@@ -2,9 +2,8 @@
 
 [![PyPI Version](https://img.shields.io/pypi/v/cherimoya.svg)](https://pypi.org/project/cherimoya/)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
-![CUDA Required](https://img.shields.io/badge/CUDA-required-green.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/jmschrei/cherimoya/blob/main/LICENSE)
-![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen.svg)
+
 
 > [!IMPORTANT]
 > Cherimoya is still under active development and may change in ways that are not back compatible. Please make note of the version you are using in case you need to return to it in the future.
