@@ -174,6 +174,16 @@ def run(args):
 		milestones=[num_warmup_iters]
 	)
 
+	if parameters['verbose']:
+		print("Muon Optimizer: lr={}, wd={}".format(parameters['muon_lr'], 
+													parameters['muon_wd']))
+		print("AdamW Optimizer: lr={}, wd={}\n".format(parameters['adam_lr'],
+													 parameters['adam_wd'])
+		  
+	###
+
+	
+
 	model.fit(training_data,
 		muon_optimizer, adam_optimizer,
 		muon_scheduler, adam_scheduler,

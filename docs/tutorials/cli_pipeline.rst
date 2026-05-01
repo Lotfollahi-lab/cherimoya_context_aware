@@ -95,7 +95,7 @@ include:
        "fit_parameters": {
            "n_filters": 64,
            "n_layers": 9,
-           "max_epochs": 100,
+           "max_epochs": 50,
            "lr": 0.004,
            "batch_size": 512,
            "max_jitter": 500,

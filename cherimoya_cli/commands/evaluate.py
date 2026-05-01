@@ -75,7 +75,7 @@ def run(args):
 		y_hat_logcounts = (y_hat_logcounts + y_hat_logcounts_rc) / 2
 
 	measures = calculate_performance_measures(y_hat_logits, y,
-		y_hat_logcounts, kernel_sigma=7, kernel_width=81)
+		y_hat_logcounts)
 
 	with open(parameters['performance_filename'], "w") as outfile:
 		outfile.write("\t".join(measure_names))
