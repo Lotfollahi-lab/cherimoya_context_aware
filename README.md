@@ -3,112 +3,127 @@
 [![PyPI Version](https://img.shields.io/pypi/v/cherimoya.svg)](https://pypi.org/project/cherimoya/)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/jmschrei/cherimoya/blob/main/LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-readthedocs-blue.svg)](https://cherimoya.readthedocs.io)
 
 
 > [!IMPORTANT]
-> Cherimoya is still under active development and may change in ways that are not back compatible. Please make note of the version you are using in case you need to return to it in the future.
+> Cherimoya is under active development and may introduce breaking changes between versions. Pin the version you train with if you need to reload checkpoints later.
 
-Cherimoya is a lightweight genomic sequence-to-function (S2F) model for predicting genomic modalities such as transcription factor binding, chromatin accessibility, and transcription initiation. It builds on concepts that were first introduced by BPNet and ChromBPNet while introducing architectural, algorithmic, and systems-level improvements that improve training stability, efficiency, and predictive performance. Despite needing significantly fewer parameters than other architectures, Cherimoya achieves strong predictive performance across a range of tasks and runs ~5-15x faster when measured on an H200 GPU. 
+Cherimoya is a compact deep learning model for predicting genomic profile data — transcription factor binding, chromatin accessibility, transcription initiation — directly from DNA sequence. It pairs a lightweight ConvNeXt-style backbone with custom Triton GPU kernels for both training and inference, and ships with an end-to-end CLI that takes BAM files through peak calling, training, attribution, and motif discovery in a single command. The default 9-layer model is **~340K parameters** and runs a full forward in **well under a millisecond per batch on an H200**, while delivering strong predictive performance across the assays we've benchmarked.
 
 <img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/cheri-model.png">
 
-The secret to Cherimoya's success is a new Cheri Block, which adapts the ConvNeXT block to the domain of noisy high-throughput genomics experiments. This block is comprised of a dilated depth-wise convolution, a layer norm, a projection into a higher-dimensional space, a GeLU non-linearity, a projection back into the original dimensionality, and a residual connection scaled by a small fixed constant. Conceptually, this means that the blocks first aggregate information spatially but independently for each feature/channel (the depth-wise convolution) and then aggregate information across features but independently for each position (the two projections). The dilated depth-wise convolution and the layer norm have been fused into an efficient custom GPU kernel that is ~2-3x faster than the native PyTorch implementation.
+### Design highlights
 
-<img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/cheri-block.png">
+The backbone is built from **Cheri Blocks** — each a depthwise dilated convolution followed by per-example layer normalization and a channel-mixing MLP, fused into custom Triton kernels so spatial and channel information are aggregated cheaply and at separate stages of each block. Training uses a tuned dual optimizer — **Muon** for projection weights, **AdamW** for everything else — with hyperparameters discovered via large-scale sweeps. The profile and counts losses are combined via **Kendall-Gal uncertainty weighting** with two learnable scalars, replacing the usual fixed loss weight with one the model balances on its own. An **exponential moving average** of the parameters is maintained during training and used at evaluation, smoothing both the validation curve and the final predictions. Several **stability-first** choices keep deep stacks well-behaved: a small fixed residual scale at initialization, no biases in the blocks, no weight decay, and a 5-epoch warmup before cosine decay. Both the architecture and the training recipe were arrived at via agent-driven exploration of the design space. See [the architecture docs](https://cherimoya.readthedocs.io/en/latest/architecture.html) for the full story.
 
 ### Installation
 
 ```bash
-pip install cherimoya
+pip install cherimoya          # or: uv pip install cherimoya
 ```
 
-Or, using [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv pip install cherimoya
-```
-
-To install from source:
+From source:
 
 ```bash
 git clone https://github.com/jmschrei/cherimoya.git
-cd cherimoya
-pip install -e .    # or: uv pip install -e .
+cd cherimoya && pip install -e .
 ```
 
-### Key Features
+GPU acceleration requires Triton and a CUDA-capable device; a pure-PyTorch CPU fallback is available for everything except the inference megakernel. See [the installation guide](https://cherimoya.readthedocs.io/en/latest/installation.html) for Triton compatibility notes.
 
-*Lightweight Architecture*: Cherimoya employs a compact convolutional backbone that substantially reduces parameter count while also slightly increasing predictive accuracy. This design enables efficient training, large-scale hyperparameter exploration, interactive usage via browsers, and usage of dozens or hundreds of such models simultaneously in complex design settings.
+### What you can do with Cherimoya
 
-*Stable training*: Several design choices were made to improve the stability of model training, including the use of layer norm in each layer, a small fixed scalar on each residual connection (configurable via the `residual_scale` argument on both `CheriBlock` and `Cherimoya`, default 0.15) that keeps the path close to the identity mapping at initialization, a cosine decay learning rate scheduler with a long warmup (5 epochs by default), removing all bias terms in the Cheri blocks, and, somewhat counterintuitively, removing weight decay from the optimizers.
+- Train a sequence-to-function model on ChIP-seq, ATAC-seq, DNase-seq, PRO-seq, or any signal that can be expressed as a stranded or unstranded coverage track.
+- Compute per-base attribution scores via *in silico* saturation mutagenesis.
+- Call seqlets and discover *de novo* motifs with TF-MoDISco.
+- Annotate seqlets against a known motif database via tomtom-lite.
+- Marginalize the contribution of inserted motifs in counterfactual sequence designs.
+- Score variants by predicting their effects on the underlying profile and counts.
+- Reproduce a training run bit-for-bit from a seed — the peak/negative sampler is a pure function of `(seed, epoch, index)`, and `num_workers > 1` is purely a speed optimization that produces the same batch sequence as `num_workers = 1`.
+- Stream remote BAM, BED, and FASTA inputs directly without downloading them first.
 
-*Automatic Loss Weight Balancing*: Profile and count losses are combined using learned weighting parameters rather than fixed hyperparameters. This approach replaces the heuristic developed for BPNet and ChromBPNet models and enables the models to scale to larger contexts and across modalities automatically, while also improving gradient stability across datasets with varying signal-to-noise characteristics.
+### The Cheri Block
 
-*Muon Optimizer*: Cherimoya uses the Muon optimizer when training the projection layers, and the AdamW optimizer for all other layers and terms. This has significantly accelerated training by reducing the number of epochs needed while modestly improving performance.
+<img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/cheri-block.png">
 
-*Model Compilation*: Because of the architectural decisions made in the Cheri block, many operations can be automatically fused together in neat ways when using `torch.compile` and so this has been built-in to the forward pass. This seems to offer a ~50-75% speed improvement. Although this compilation needs to only be done once and can be then re-used across models and sessions, it may need to be redone each time the batch size has changed, e.g., for the last batch being processed.
+Each block performs a 3-tap dilated depthwise convolution, a per-example layer normalization, a linear expansion to `expansion × n_filters` channels, a GELU non-linearity, a contraction back to `n_filters` channels, and a residual connection scaled by a small fixed constant (`residual_scale`, default `0.15`). The convolution and normalization are fused into a custom Triton kernel; under `torch.no_grad()` the entire block (including the MLP) collapses into a second fused megakernel for inference. The default 9-layer model uses dilations `1, 2, 4, ..., 256`, giving a receptive field of 1115 bp and a 2114 → 1000 bp input/output by default. See [the architecture docs](https://cherimoya.readthedocs.io/en/latest/architecture.html) for receptive field math, kernel internals, and the rationale for each design choice.
 
-*Mixed Precision*: When data is of reasonable depth, Cherimoya models are best trained using mixed precision, which can offer a ~2x speed improvement (sometimes more when also compiling the model). However, using mixed precision can hurt performance when the data is very low quality or low read depth, such as for TF ChIP-seq experiments or pseudobulks for rare cell types. We recommend using `float32` precision for BPNet-style models as a starting point unless you have particularly high-quality data.
+### Performance
 
-*Deterministic Sampling*: The peak/negative sampler in `PeakGenerator` is a pure function of `(random_state, epoch, idx)`, so every peak appears exactly once per epoch and two runs with the same seed produce bit-identical training data. `num_workers > 1` is purely a speed optimization — it produces the **same** sequence of batches as `num_workers = 1`, just faster.
+| Path | Single block (N=16, L=1024, C=96) | Full Cherimoya (N=4, L=2114, default) |
+|---|---|---|
+| CPU (pure PyTorch) | 4.71 ms | 21.92 ms |
+| GPU, grad-enabled (training fwd) | 0.101 ms | 1.106 ms |
+| GPU, no_grad (inference megakernel) | **0.064 ms** | **0.583 ms** |
 
+All three paths agree on the model output to within ~1e-5 max-abs, so existing trained checkpoints produce numerically equivalent predictions through every path. The forward-only megakernel is automatically dispatched when gradients aren't needed; training is unaffected. CPU inference is comfortable for development and one-off evaluation on a laptop — only training and high-throughput inference benefit from a GPU. See [the benchmarks page](https://cherimoya.readthedocs.io/en/latest/benchmarks.html) for the full sweep across batch sizes and model widths.
 
-### Saving and Loading Models
+### End-to-end CLI pipeline
 
-Models are saved as a dictionary containing the constructor arguments and a state dict, rather than a pickled module. This format is robust to source-layout changes and is safe to load with PyTorch's `weights_only=True` setting:
+<img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/pipeline.png" width=70%>
+
+The CLI strings the full pipeline — peak calling, signal extraction, training, attribution, seqlet calling, motif discovery — into a single reproducible run. Each step is parameterized through a JSON file, which serves both as a runtime config and a permanent record of what was run. The user-supplied JSON is merged with sensible defaults, so practical configs are short.
+
+**Step 1: generate a pipeline JSON from raw data pointers.** Provide a reference genome, one or more signal files, optional controls, a BED of positive loci, and a motif database. For stranded ChIP-seq:
+
+```bash
+cherimoya pipeline-json \
+    -s hg38.fa -p peaks.bed.gz \
+    -i input1.bam -i input2.bam \
+    -c control1.bam -c control2.bam \
+    -m JASPAR_2024.meme -n my_experiment -o pipeline.json
+```
+
+For unstranded paired-end ATAC-seq with the standard +4/−4 fragment shift:
+
+```bash
+cherimoya pipeline-json \
+    -s hg38.fa -p peaks.bed.gz \
+    -i fragments.bam -m JASPAR_2024.meme \
+    -n atac_experiment -o pipeline.json \
+    -ps 4 -ns -4 -u -f -pe
+```
+
+Any input path can be remote (S3, HTTPS, etc.); the pipeline streams reads through `bam2bw` directly.
+
+**Step 2: edit the JSON if you want to override defaults** — model width, training/validation chromosomes, seqlet p-value threshold, MoDISco settings, anything. Then run:
+
+```bash
+cherimoya pipeline -p pipeline.json
+```
+
+This calls peaks with MACS3, samples GC-matched negatives, trains a Cherimoya model, computes attributions via saturation mutagenesis, calls seqlets, annotates them with tomtom-lite, and runs TF-MoDISco. The outputs land in the working directory: a `.torch` model checkpoint and training log, per-track bigWigs, a saturation-mutagenesis attribution array (`.npz`), a seqlet table with tomtom-lite annotations, and a TF-MoDISco results H5. Each sub-step writes its own JSON snapshot so individual stages can be re-run in isolation with the `negatives`, `fit`, `evaluate`, `attribute`, `marginalize`, or `seqlets` subcommands. The `batch` subcommand parallelizes a pipeline across multiple datasets. See [the CLI reference](https://cherimoya.readthedocs.io/en/latest/cli.html) for the full command list and JSON schema.
+
+### Python API and saving/loading
+
+For programmatic use, the three public symbols are `Cherimoya` (the model), `CheriBlock` (the building block), and `EMA` (the parameter exponential-moving-average wrapper used during training):
 
 ```python
 from cherimoya import Cherimoya
 
-model = Cherimoya(n_filters=96, n_layers=9, n_outputs=2)
-# ... train ...
+model = Cherimoya(n_filters=96, n_layers=9, n_outputs=1).cuda()
+y_profile, y_counts = model(X)              # X: (N, 4, L) one-hot DNA
+```
+
+Models are saved as a config + state_dict bundle, not a pickled module. This format is robust to source-layout changes and safe to load with `weights_only=True`:
+
+```python
 model.save("my_model.torch")
-
-# Load on CPU (default)
-model = Cherimoya.load("my_model.torch")
-
-# Or load directly onto a GPU
+model = Cherimoya.load("my_model.torch")              # CPU by default
 model = Cherimoya.load("my_model.torch", device="cuda")
 ```
 
-The CLI commands (`evaluate`, `attribute`, `marginalize`) and `model.fit()` use this format internally. Older checkpoints saved with `torch.save(model, ...)` are not compatible with `Cherimoya.load` and should be retrained.
+Older checkpoints saved with `torch.save(model, ...)` are not compatible with `Cherimoya.load` and must be retrained. The CLI subcommands and `model.fit(...)` use this format internally. See [the Python API docs](https://cherimoya.readthedocs.io/en/latest/api/model.html) for the full `fit()` and `predict()` signatures.
 
-### End-to-End Pipeline
+### Documentation
 
-<img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/pipeline.png" width=70%>
+Full documentation, including tutorials, architecture details, and API reference, is at [cherimoya.readthedocs.io](https://cherimoya.readthedocs.io). The [changelog](https://cherimoya.readthedocs.io/en/latest/CHANGELOG.html) tracks user-visible changes between versions.
 
-Cherimoya provides an integrated command-line pipeline that allows you to go directly from mapped reads, to model training and evaluation, to analysis results. This pipeline improves reproducibility by being self-documenting on the parameter settings for each step, and dramatically reduces the overhead associated with managing seperate tooling for each stage. Specifically, it includes:
+### Citation
 
-- Conversion from BAM/SAM/fragment files to (un)/stranded bigWig(s) using bam2bw
-- Peak calling using MACS3
-- Calling of GC-matched negatives
-- Model training and evaluation
-- Attribution scores using *in silico* saturation mutagenesis
-- Seqlet calling and annotation using tomtom-lite
-- De novo motif discovery using TF-MoDISco
+If you use Cherimoya in published work, please cite the repository. A formal preprint is forthcoming.
 
-A multi-step pipeline like this has many hyperparameters that can be customized at each step (e.g., number of filters in the model, number of seqlets to use for TF-MoDISco) and requires pointers to several input and output files. Rather than using a giant command-line call, Cherimoya uses JSONs to manage each step of the pipeline. An advantage of using JSONs is that they create a permanent record of the exact command that was run. Although there are many hyperparameters, the user-provided JSONs can be quite small in practice because they are internally merged with the default parameters for each step. The fastest way to begin this process is through the `pipeline-json` command, which takes in pointers to your data files and flags describing the data and produces a valid JSON for the pipeline process. These data files usually include a reference genome, some number of input (and optionally control) BAM/SAM/tsv/tsv.gz files (the `-i` and `-c` arguments can be repeated) a BED file of positive loci, and a MEME formatted motif database used for evaluation of the model.
+### License
 
-For example, if you are working with ChIP-seq data that is stranded:
-
-```
-cherimoya pipeline-json -s hg38.fa -p peaks.bed.gz -i input1.bam -i input2.bam -c control1.bam -c control2.bam -n test -o pipeline.json -m JASPAR_2024.meme
-```
-
-If you are working with ATAC-seq data, which is unstranded and comes in the form of paired-end fragmnents that need to be shifted +4/-4 (as they do in the ChromBPNet work) you can use the following:
-
-```
-cherimoya pipeline-json -s hg38.fa -p peaks.bed.gz -i input1.bam -i input2.bam -n atac-test -o atac-pipeline.json -m JASPAR_2024.meme -ps 4 -ns -4 -u -f -pe
-```
-
-Note that any of these data pointers can point to remote files. This will stream the data through bam2bw and read the peak files remotely. Processing speed will then depend on the speed of your internet connection and whether the hosting site throttles your connection.
-
-The resulting JSON stored at `pipeline.json` or `atac-pipeline.json` can then be executed using the `pipeline` command. These commands are separated because, although the first command produces a valid JSON that the second command can immediately use, one may wish to modify some of the many parameters in the JSON. These parameters include the number of filters and layers in the model, the training and validation chromosomes, and the p-value threshold for calling seqlets. The defaults for most of these steps seem reasonable in practice, but there is immense flexibility there, e.g., the ability to train the model using a reference genome and then make predictions or attributions on synthetic sequences or the reference genome from another species. In this manner, the JSON serves as documentation for the experiments that have been performed.
-
-```
-cherimoya pipeline -p pipeline.json
-```
-
-When running the pipeline, a JSON is produced for each one of the steps (except for running TF-MoDISco and annotating the seqlets, which uses `ttl`). Each of these JSONs can be run by itself using the appropriate built-in command. Because some of the values in the JSONs for these steps are set programmatically when running the file pipeline, e.g., the filenames to read in and save to, being able to inspect every one of the JSONs can be handy for debugging.
-  
-
+MIT. See [`LICENSE`](https://github.com/jmschrei/cherimoya/blob/main/LICENSE).
