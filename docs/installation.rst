@@ -7,15 +7,24 @@ Requirements
 Cherimoya requires:
 
 - Python ≥ 3.10
-- PyTorch ≥ 2.6 (with CUDA support recommended)
-- A CUDA-capable GPU (for the fused Triton kernel)
+- PyTorch ≥ 2.9
+- A CUDA-capable GPU is **strongly recommended** for training and
+  high-throughput inference. A pure-PyTorch CPU fallback path is
+  provided for everything except the inference megakernel, so the
+  package can be installed and the model can be run on machines
+  without a GPU. Training on CPU is impractical at any realistic
+  scale.
 
-.. warning::
-   Cherimoya relies on `Triton <https://github.com/triton-lang/triton>`_ for its custom
-   GPU kernels. Due to its low-level nature, Triton requires a hardware-dependent
-   installation that varies based on your GPU architecture and CUDA version.
-   Please ensure your hardware is compatible and that you have the appropriate
-   drivers and PyTorch-compatible CUDA toolkit installed.
+.. note::
+
+   Cherimoya's custom GPU kernels are written in `Triton
+   <https://github.com/triton-lang/triton>`_. ``triton`` is a hard
+   dependency and is installed automatically from PyPI. On Linux with a
+   modern CUDA toolkit and a recent PyTorch wheel, this works without
+   any extra steps. On unusual configurations (custom CUDA versions,
+   non-x86 hosts) Triton may need to be installed against your specific
+   toolchain — see the Triton README for details.
+
 
 Install from PyPI
 -----------------
@@ -24,7 +33,7 @@ Install from PyPI
 
    pip install cherimoya
 
-Install from Source
+Install from source
 -------------------
 
 .. code-block:: bash
@@ -36,25 +45,24 @@ Install from Source
 Install with uv
 ---------------
 
-`uv <https://docs.astral.sh/uv/>`_ is a fast Python package manager that can be used
-as a drop-in replacement for pip.
+`uv <https://docs.astral.sh/uv/>`_ is a fast Python package manager that
+can be used as a drop-in replacement for pip:
 
 .. code-block:: bash
 
    uv pip install cherimoya
 
-Install from source with uv:
-
-.. code-block:: bash
-
+   # or, from source:
    git clone https://github.com/jmschrei/cherimoya.git
    cd cherimoya
    uv pip install -e .
 
+
 Dependencies
 ------------
 
-The following packages are installed automatically:
+The following packages are installed automatically. Pinned lower-bounds
+are taken from ``pyproject.toml``.
 
 .. list-table::
    :header-rows: 1
@@ -62,24 +70,39 @@ The following packages are installed automatically:
 
    * - Package
      - Purpose
-   * - ``torch``
-     - Deep learning framework
-   * - ``triton``
-     - Custom GPU kernel compilation
-   * - ``numpy``, ``scipy``, ``pandas``
-     - Numerical computing and data handling
-   * - ``h5py``
-     - HDF5 file I/O
-   * - ``tangermeme``
-     - Genomic sequence utilities and attribution
-   * - ``bpnet-lite``
-     - Loss functions and logging from BPNet
+   * - ``torch`` (≥ 2.9)
+     - Tensor framework and autograd.
+   * - ``triton`` (≥ 3.5.1)
+     - Custom GPU kernels for Cheri Blocks (fwd+bwd) and the inference
+       megakernel.
+   * - ``numpy`` (≥ 1.14), ``scipy`` (≥ 1.0), ``pandas`` (≥ 1.3.3)
+     - Numerical computing and tabular data handling.
+   * - ``h5py`` (≥ 3.7)
+     - HDF5 I/O (TF-MoDISco results, attribution arrays).
+   * - ``tqdm`` (≥ 4.64.1)
+     - Progress bars for data loading and training.
+   * - ``tangermeme`` (≥ 0.2.3)
+     - Sequence loading, attribution (saturation mutagenesis), and
+       seqlet extraction primitives.
+   * - ``bpnet-lite`` (≥ 1.0.0)
+     - Multinomial NLL and log1p-MSE losses; ControlWrapper /
+       CountWrapper / ProfileWrapper helpers used by the attribute and
+       marginalize subcommands.
    * - ``macs3``
-     - Peak calling
-   * - ``bam2bw``
-     - BAM/SAM to bigWig conversion
+     - Peak calling, invoked by the ``pipeline`` subcommand.
+   * - ``bam2bw`` (≥ 0.4.1)
+     - BAM/SAM/fragment file → bigWig conversion; used by the
+       ``pipeline`` subcommand and supports remote input URLs.
+   * - ``modisco`` (≥ 2.0)
+     - TF-MoDISco motif discovery, invoked by the ``pipeline``
+       subcommand.
+   * - ``seaborn`` (≥ 0.11.2)
+     - Plotting used by the marginalization report.
+   * - ``joblib`` (≥ 1.0.0)
+     - Parallel execution backend for the ``batch`` subcommand.
 
-Optional Dependencies
+
+Optional dependencies
 ---------------------
 
 .. list-table::
@@ -89,13 +112,16 @@ Optional Dependencies
    * - Package
      - Purpose
    * - ``scikit-learn``
-     - Required only for AUROC/AUPRC evaluation metrics
-   * - ``modisco``
-     - TF-MoDISco motif discovery
-   * - ``seaborn``
-     - Visualization
+     - Required only for the ``auroc`` / ``auprc`` measures inside
+       :func:`cherimoya.performance.calculate_performance_measures`.
+       The rest of the package does not import it.
 
-Verifying the Installation
+Documentation build dependencies (``sphinx``, ``furo``,
+``sphinx-copybutton``) are listed under the ``docs`` extra in
+``pyproject.toml`` and can be installed with ``pip install -e .[docs]``.
+
+
+Verifying the installation
 --------------------------
 
 .. code-block:: python
@@ -104,5 +130,75 @@ Verifying the Installation
    print(cherimoya.__version__)
 
    from cherimoya import Cherimoya
-   model = Cherimoya(n_filters=64, n_layers=9)
-   print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+   model = Cherimoya(n_filters=96, n_layers=9)
+   print("Parameters:", sum(p.numel() for p in model.parameters()))
+
+The default 9-layer model has roughly 340K parameters. The package will
+import and the model will instantiate without a GPU; a CUDA device is
+only needed when you call ``.cuda()`` or pass tensors that live on a
+GPU.
+
+
+Hardware expectations
+---------------------
+
+The default 9-layer, 96-filter Cherimoya model is small (~340K
+parameters). The dominant memory cost during training is the
+activations and the optimizer state, not the parameters; both scale
+linearly with ``batch_size``, ``in_window``, and ``n_filters``.
+
+In practice:
+
+* The default training configuration (``batch_size=64``,
+  ``in_window=2114``, ``n_filters=96``, 9 layers) fits comfortably on
+  a 16 GB GPU.
+* Inference at ``batch_size=512`` (the CLI default) fits on the same
+  hardware.
+* If you have less VRAM, reduce ``batch_size`` first; reducing
+  ``n_filters`` is a secondary lever.
+
+Training time scales linearly with peak count and epochs and is
+dominated by the dataloader for typical configurations. For a
+ChIP-seq target with a few tens of thousands of peaks and the default
+50-epoch schedule, full training is a tens-of-minutes operation on a
+modern data-center GPU. See :doc:`benchmarks` for measured forward
+times.
+
+
+Smoke test
+----------
+
+The fastest way to confirm a working install end-to-end is to
+instantiate a model, run one forward pass on random input, and check
+that the output shapes are right:
+
+.. code-block:: python
+
+   import torch
+   from cherimoya import Cherimoya
+
+   model = Cherimoya(n_filters=96, n_layers=9, n_outputs=1)
+   if torch.cuda.is_available():
+       model = model.cuda()
+
+   X = torch.randn(2, 4, 2114)
+   if torch.cuda.is_available():
+       X = X.cuda()
+
+   with torch.no_grad():
+       y_profile, y_counts = model(X)
+
+   print(y_profile.shape)   # torch.Size([2, 1, 1000])
+   print(y_counts.shape)    # torch.Size([2, 1])
+
+If both shape prints match, your install is working through every
+forward path the model uses. The first call on GPU will spend a
+few seconds in Triton autotune — see
+:doc:`troubleshooting` if it stays slow.
+
+To run the full CLI pipeline end-to-end on real data, pick a small
+ChIP-seq target from ENCODE (CTCF in K562, for example), download
+the BAM and matched input BAM, and follow :doc:`recipes/chipseq_tf`.
+A short ChIP-seq dataset with ~30k peaks completes the full
+peak-calling-through-MoDISco pipeline in tens of minutes on a single
+modern GPU.

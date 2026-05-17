@@ -1,33 +1,37 @@
 Python API Tutorial
 ===================
 
-This tutorial demonstrates how to use the Cherimoya Python API to train a
-model, make predictions, and evaluate performance.
+This tutorial shows how to use the Cherimoya Python API to build a
+model, train it, and generate predictions. For attribution, motif
+analysis, and variant effect prediction see the dedicated tutorials.
 
 
-Creating a Model
+Creating a model
 ----------------
 
-A Cherimoya model is a standard ``torch.nn.Module``:
+``Cherimoya`` is a ``torch.nn.Module``:
 
 .. code-block:: python
 
    from cherimoya import Cherimoya
 
    model = Cherimoya(
-       n_filters=96,           # Width of the convolutional backbone (default 96)
-       n_layers=9,             # Number of Cheri Blocks (dilation: 1, 2, ..., 256)
-       n_outputs=2,            # Output tracks (2 for stranded data)
-       n_control_tracks=0,     # Control input tracks (0 if no controls)
-       expansion=2,            # MLP expansion factor inside each Cheri Block (default 2)
-       residual_scale=0.15,    # Fixed scalar on each residual connection (default 0.15)
-       single_count_output=True,  # Single scalar count vs. per-track counts
-       name="my_model",        # Model name (used for save filenames)
+       n_filters=96,              # backbone width
+       n_layers=9,                # number of Cheri Blocks (dilations 1, 2, ..., 256)
+       n_outputs=2,               # number of profile output tracks (e.g. 2 for stranded)
+       n_control_tracks=0,        # number of control input tracks
+       expansion=2,               # MLP expansion factor inside each Cheri Block
+       residual_scale=0.15,       # fixed residual scale
+       single_count_output=True,  # single scalar count vs. one count per track
+       name="my_model",           # used for save filenames
    ).cuda()
 
+The full constructor signature, including ``trimming`` and
+``verbose``, is in :doc:`../api/model`.
 
-Understanding the Input/Output Shapes
---------------------------------------
+
+Input/output shapes
+-------------------
 
 .. list-table::
    :header-rows: 1
@@ -37,78 +41,83 @@ Understanding the Input/Output Shapes
      - Shape
      - Description
    * - ``X`` (input)
-     - ``(batch, 4, in_window)``
-     - One-hot encoded DNA sequence
+     - ``(N, 4, in_window)``
+     - One-hot encoded DNA over the input window. ``in_window`` is
+       2114 by default.
    * - ``X_ctl`` (optional)
-     - ``(batch, n_control, in_window)``
-     - Control signal per position
+     - ``(N, n_control_tracks, in_window)``
+     - Per-position control signal. Pass ``None`` when ``n_control_tracks
+       == 0``.
    * - ``y_profile`` (output)
-     - ``(batch, n_outputs, out_window)``
-     - Predicted profile logits
+     - ``(N, n_outputs, out_window)``
+     - Predicted profile logits. ``out_window`` is 1000 by default.
    * - ``y_counts`` (output)
-     - ``(batch, n_count_outputs)``
-     - Predicted log counts
+     - ``(N, n_count_outputs)``
+     - Predicted log counts. ``n_count_outputs`` is 1 if
+       ``single_count_output`` else ``n_outputs``.
 
-The default ``in_window`` is 2114 bp and ``out_window`` is 1000 bp. The
-difference (``trimming = (2114 - 1000) / 2 = 557``) accounts for the receptive
-field of the dilated convolution stack.
+By default ``trimming = 46 + sum(2**i for i in range(n_layers))``,
+which is 557 for the default 9-layer model and gives the 2114 → 1000
+window pair.
 
 
-Loading Training Data
+Loading training data
 ---------------------
 
-The :func:`~cherimoya.io.PeakGenerator` function handles all data I/O:
+:func:`cherimoya.io.PeakGenerator` reads peaks, negatives, sequences,
+and signal/control bigWigs, applies filtering and jitter, and returns
+a ``torch.utils.data.DataLoader``:
 
 .. code-block:: python
 
    from cherimoya.io import PeakGenerator
 
    training_data = PeakGenerator(
-       peaks="peaks.narrowPeak",         # Peak regions (BED/narrowPeak)
-       negatives="negatives.bed",        # GC-matched negative regions
-       sequences="hg38.fa",             # Reference genome
-       signals=["signal.+.bw", "signal.-.bw"],  # Signal tracks
-       controls=None,                    # Control tracks (or list of bigWigs)
-       chroms=["chr2", "chr4", "chr5"],  # Training chromosomes
+       peaks="peaks.narrowPeak",
+       negatives="negatives.bed",
+       sequences="hg38.fa",
+       signals=["signal.+.bw", "signal.-.bw"],
+       controls=None,                       # or list of bigWigs
+       chroms=["chr2", "chr4", "chr5"],     # training chromosomes
        in_window=2114,
        out_window=1000,
-       max_jitter=128,                   # Random position jitter (bp)
-       negative_ratio=0.1,              # Ratio of negatives to peaks
-       reverse_complement=True,          # Augment with reverse complements
+       max_jitter=50,                       # peak-center jitter at training time
+       negative_ratio=0.1,                  # n_negatives per n_peaks per epoch
+       reverse_complement=True,             # augment with reverse complements
        batch_size=64,
-       num_workers=1,                    # Async prefetch workers
-       random_state=0,                   # Sampler seed (reproducible)
+       num_workers=1,                       # async prefetch workers
+       random_state=0,                      # base seed; reproducible
+       verbose=True,                        # print progress and filter counts
    )
 
-.. tip::
+Setting ``verbose=True`` prints per-step counts of filtered peaks and
+filtered negatives, which is the easiest way to verify the loader is
+seeing the data you expect.
 
-   Use ``verbose=True`` to see progress bars during data loading and summary
-   statistics about the number of peaks, negatives, and filtered regions.
 
+Reproducible sampling
+~~~~~~~~~~~~~~~~~~~~~
 
-Sampling Strategy
-^^^^^^^^^^^^^^^^^
-
-The underlying :class:`~cherimoya.io.PeakNegativeSampler` is fully
+The underlying :class:`cherimoya.io.PeakNegativeSampler` is fully
 deterministic given ``random_state``. ``__getitem__(idx)`` is a pure
 function of ``idx`` and the current epoch, with no dependence on call
-history. As a consequence:
+history.
 
-- Each epoch yields exactly ``n_peaks + int(n_peaks * negative_ratio)``
+* Each epoch yields exactly ``n_peaks + int(n_peaks * negative_ratio)``
   examples; every peak appears exactly once and the peak/negative
-  interleaving is random but reproducible.
-- Setting ``num_workers > 1`` produces the **same** sequence of batches
-  as ``num_workers = 1`` — just faster. All workers compute the same
-  data for any given index.
-- Per-position augmentations (jitter, reverse-complement) are also
-  drawn from the per-epoch RNG, so two runs with the same seed produce
-  bit-identical training data.
+  interleaving is reproducible.
+* Setting ``num_workers > 1`` produces the *same* sequence of batches
+  as ``num_workers = 1``, just faster.
+* Per-position jitter and reverse-complement flips are drawn from the
+  per-epoch RNG, so two runs with the same seed produce bit-identical
+  training data.
 
 
-Preparing Validation Data
---------------------------
+Preparing validation data
+-------------------------
 
-Validation data is loaded as a single block of tensors:
+Validation data is loaded as a single block of tensors using
+``tangermeme.io.extract_loci``:
 
 .. code-block:: python
 
@@ -118,33 +127,32 @@ Validation data is loaded as a single block of tensors:
        sequences="hg38.fa",
        signals=["signal.+.bw", "signal.-.bw"],
        loci="peaks.narrowPeak",
-       chroms=["chr8", "chr20"],  # Held-out validation chromosomes
+       chroms=["chr8", "chr20"],
        in_window=2114,
        out_window=1000,
-       max_jitter=0,              # No jitter for validation
-       ignore=list('QWERYUIOPSDFHJKLZXVBNM'),  # Ignore non-standard chroms
+       max_jitter=0,
+       ignore=list('QWERYUIOPSDFHJKLZXVBNM'),
    )
 
-   X_valid, y_valid = valid_data  # Without controls
-   # X_valid, y_valid, X_ctl_valid = valid_data  # With controls
+   X_valid, y_valid = valid_data
+   # X_valid, y_valid, X_ctl_valid = valid_data   # with controls
 
 
-Setting Up Optimizers
----------------------
+Optimizers and schedulers
+-------------------------
 
-Cherimoya uses a dual-optimizer strategy — **Muon** for 2D projection layers
-and **AdamW** for everything else:
+Cherimoya uses a dual-optimizer strategy: Muon for 2D projection
+weights in the Cheri Blocks, AdamW for everything else. To match the
+CLI defaults exactly:
 
 .. code-block:: python
 
    from torch.optim import AdamW, Muon
-   from torch.optim.lr_scheduler import (
-       LinearLR, CosineAnnealingLR, SequentialLR
-   )
+   from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
-   # Route parameters to the appropriate optimizer, with Muon only handling
-   # internal 2D matrices and leaving all other parameters, including the
-   # head and tail layers, to AdamW
+   # Route parameters. Muon takes the 2D weights inside Cheri Blocks
+   # (linear1.weight and linear2.weight); AdamW takes everything else,
+   # including the count-head linear layer (name == "linear.weight").
    muon_params, adam_params = [], []
    for name, p in model.named_parameters():
        if p.ndim == 2 and "weight" in name and name != "linear.weight":
@@ -152,27 +160,27 @@ and **AdamW** for everything else:
        else:
            adam_params.append(p)
 
-   # Create optimizers
-   muon_optimizer = Muon(muon_params, lr=0.01, weight_decay=0.0)
-   adam_optimizer = AdamW(adam_params, lr=0.004, weight_decay=0.0)
+   muon_optimizer = Muon(muon_params, lr=0.025, weight_decay=0.01)
+   adam_optimizer = AdamW(adam_params, lr=0.004, weight_decay=0.2)
 
-   # Warmup + cosine decay schedules
-   n_warmup_iters = len(training_data) * 5      # 5 epoch warmup
-   n_total_iters = len(training_data) * 50       # 50 total epochs
+   # Warmup for 5 epochs, then cosine decay for the rest of training
+   # down to eta_min=1e-5. Note T_max uses (max_epochs - 5), not max_epochs.
+   max_epochs = 50
+   num_warmup_epochs = 5
+   num_warmup_iters = len(training_data) * num_warmup_epochs
+   num_decay_iters = len(training_data) * max(1, max_epochs - num_warmup_epochs)
 
-   muon_scheduler = SequentialLR(muon_optimizer, schedulers=[
-       LinearLR(muon_optimizer, start_factor=0.01, total_iters=n_warmup_iters),
-       CosineAnnealingLR(muon_optimizer, T_max=n_total_iters, eta_min=1e-5),
-   ], milestones=[n_warmup_iters])
+   def make_scheduler(opt):
+       warm = LinearLR(opt, start_factor=0.01, total_iters=num_warmup_iters)
+       cos = CosineAnnealingLR(opt, T_max=num_decay_iters, eta_min=1e-5)
+       return SequentialLR(opt, schedulers=[warm, cos], milestones=[num_warmup_iters])
 
-   adam_scheduler = SequentialLR(adam_optimizer, schedulers=[
-       LinearLR(adam_optimizer, start_factor=0.01, total_iters=n_warmup_iters),
-       CosineAnnealingLR(adam_optimizer, T_max=n_total_iters, eta_min=1e-5),
-   ], milestones=[n_warmup_iters])
+   muon_scheduler = make_scheduler(muon_optimizer)
+   adam_scheduler = make_scheduler(adam_optimizer)
 
 
-Training the Model
-------------------
+Training
+--------
 
 .. code-block:: python
 
@@ -181,59 +189,51 @@ Training the Model
        muon_optimizer, adam_optimizer,
        muon_scheduler, adam_scheduler,
        X_valid=X_valid,
-       X_ctl_valid=None,    # Pass control tensors here if using controls
+       X_ctl_valid=None,            # pass control tensors here if using controls
        y_valid=y_valid,
        max_epochs=50,
        batch_size=64,
-       early_stopping=15,   # Stop after 15 epochs without improvement
-       dtype='float32',     # Or 'bfloat16' for mixed precision
+       early_stopping=15,           # stop after 15 epochs without count-Pearson gain
+       dtype='float32',             # or 'bfloat16' for mixed precision via autocast
        device='cuda',
    )
 
-During training, the model saves:
+What ``fit`` does internally:
 
-- ``my_model.torch`` — best model checkpoint
-- ``my_model.final.torch`` — final model after training
-- ``my_model.log`` — training/validation metrics log
+* Maintains an :class:`~cherimoya.cherimoya.EMA` shadow of every
+  floating-point parameter (decay 0.999). The shadow is updated after
+  every optimizer step.
+* Runs the training step with ``torch.autocast`` using ``dtype``.
+* Validates at the end of each epoch using the EMA-applied weights;
+  the validation Pearson correlation on counts is the metric used for
+  best-checkpoint selection.
+* Saves ``{model.name}.torch`` whenever validation count Pearson
+  improves, and ``{model.name}.final.torch`` at the very end (also
+  with EMA weights applied).
+* Saves ``{model.name}.log`` with the training and validation metrics
+  per epoch.
+
+Once the gradients on ``lw0`` (the profile loss-weight scalar) become
+small at the end of an epoch, both loss-weight scalars are frozen and
+the loss reduces to a fixed weighted sum for the rest of training.
 
 
-Saving and Loading Models
--------------------------
+Saving and loading
+------------------
 
-Cherimoya checkpoints store the constructor arguments next to the parameter
-state dict. This makes loading robust to package layout changes and lets the
-checkpoint be loaded with PyTorch's ``weights_only=True`` setting.
-
-**Saving**:
+See :doc:`save_load` for the full discussion. Briefly:
 
 .. code-block:: python
 
-   from cherimoya import Cherimoya
-
-   model = Cherimoya(n_filters=96, n_layers=9, n_outputs=2)
-   # ... train ...
    model.save("my_model.torch")
-
-**Loading**:
-
-.. code-block:: python
-
-   from cherimoya import Cherimoya
-
-   # Load to CPU (default) — fine for inspection or CPU-only inference.
-   model = Cherimoya.load("my_model.torch")
-
-   # Load directly onto GPU.
    model = Cherimoya.load("my_model.torch", device="cuda")
 
-The checkpoint is a dictionary with two keys, ``config`` (the kwargs
-passed to ``Cherimoya.__init__``) and ``state_dict`` (the parameter
-tensors). Older checkpoints saved with ``torch.save(model, ...)`` are not
-compatible with this loader and should be retrained or migrated.
 
-
-Making Predictions
+Making predictions
 ------------------
+
+For evaluation use the standard ``tangermeme.predict`` helper, which
+batches the input and concatenates the outputs:
 
 .. code-block:: python
 
@@ -247,7 +247,8 @@ Making Predictions
        dtype='float32',
    )
 
-For reverse-complement averaging (often improves performance):
+Reverse-complement averaging often improves performance and is what
+the ``evaluate`` CLI uses when ``reverse_complement_average`` is set:
 
 .. code-block:: python
 
@@ -257,13 +258,16 @@ For reverse-complement averaging (often improves performance):
        model, torch.flip(X_test, dims=(-1, -2)),
        batch_size=64, device='cuda',
    )
-
    y_profile_avg = (y_profile + torch.flip(y_profile_rc, dims=(-1, -2))) / 2
    y_counts_avg = (y_counts + y_counts_rc) / 2
 
 
-Evaluating Performance
+Evaluating performance
 ----------------------
+
+:func:`cherimoya.performance.calculate_performance_measures` computes
+profile and counts metrics. It takes predicted logits, observed
+counts, and predicted log counts, and returns a dict of tensors:
 
 .. code-block:: python
 
@@ -275,4 +279,50 @@ Evaluating Performance
    )
 
    for name, values in measures.items():
-       print(f"{name}: {values.mean():.4f}")
+       print(f"{name}: {values.mean().item():.4f}")
+
+If ``measures`` is ``None`` (the default), all built-in measures are
+computed. The full list and signature is in :doc:`../api/performance`.
+
+
+Interpreting the metrics
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Rough ballparks from typical ChIP-seq and ATAC-seq experiments,
+useful for sanity-checking a trained model:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 35 35
+
+   * - Metric
+     - Usable
+     - Strong
+   * - ``count_pearson``
+     - ≥ 0.5
+     - ≥ 0.7
+   * - ``profile_pearson``
+     - ≥ 0.3
+     - ≥ 0.5
+   * - ``profile_jsd``
+     - ≤ 0.5
+     - ≤ 0.3
+   * - ``profile_mnll``
+     - context-dependent — compare to baseline
+     - context-dependent
+
+Notes:
+
+* Count Pearson is computed across the held-out set as a single
+  scalar (one correlation across all examples), so it is sensitive
+  to dynamic range. Datasets with a wider distribution of peak
+  heights produce higher count Pearson at fixed model quality;
+  comparing count Pearson across datasets is not apples-to-apples.
+* Profile Pearson and JSD are per-example and then averaged, so
+  they're more comparable across datasets but noisier per example.
+* ``count_pearson`` near zero is almost always a sign of a setup
+  problem (see :doc:`../troubleshooting`); a well-trained model on
+  real data essentially never lands there.
+* When training with controls, omitting ``controls`` at evaluation
+  collapses ``count_pearson`` — the count head sees the wrong
+  feature distribution.

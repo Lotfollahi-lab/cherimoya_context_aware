@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.abspath('..'))
 project = 'Cherimoya'
 copyright = '2026, Jacob Schreiber'
 author = 'Jacob Schreiber'
-release = '0.0.1'
+release = '0.1.0'
 
 # -- General configuration ---------------------------------------------------
 
@@ -24,7 +24,9 @@ extensions = [
 ]
 
 templates_path = ['_templates']
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store',
+    '.ipynb_checkpoints', '**/.ipynb_checkpoints',
+    '.ipynb_checkpoints/**', '**/.ipynb_checkpoints/**']
 
 # Napoleon settings for NumPy-style docstrings
 napoleon_google_docstrings = False

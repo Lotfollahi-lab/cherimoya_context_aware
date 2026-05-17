@@ -15,7 +15,7 @@ Cherimoya is a compact deep learning model for predicting genomic profile data �
 
 ### Design highlights
 
-The backbone is built from **Cheri Blocks** — each a depthwise dilated convolution followed by per-example layer normalization and a channel-mixing MLP, fused into custom Triton kernels so spatial and channel information are aggregated cheaply and at separate stages of each block. Training uses a tuned dual optimizer — **Muon** for projection weights, **AdamW** for everything else — with hyperparameters discovered via large-scale sweeps. The profile and counts losses are combined via **Kendall-Gal uncertainty weighting** with two learnable scalars, replacing the usual fixed loss weight with one the model balances on its own. An **exponential moving average** of the parameters is maintained during training and used at evaluation, smoothing both the validation curve and the final predictions. Several **stability-first** choices keep deep stacks well-behaved: a small fixed residual scale at initialization, no biases in the blocks, no weight decay, and a 5-epoch warmup before cosine decay. Both the architecture and the training recipe were arrived at via agent-driven exploration of the design space. See [the architecture docs](https://cherimoya.readthedocs.io/en/latest/architecture.html) for the full story.
+The backbone is built from **Cheri Blocks** — each a depthwise dilated convolution followed by per-example layer normalization and a channel-mixing MLP, fused into custom Triton kernels so spatial and channel information are aggregated cheaply and at separate stages of each block. Training uses a tuned dual optimizer — **Muon** for projection weights, **AdamW** for everything else — with hyperparameters discovered via large-scale sweeps. The profile and counts losses are combined via **Kendall-Gal uncertainty weighting** with two learnable scalars, replacing the usual fixed loss weight with one the model balances on its own. An **exponential moving average** of the parameters is maintained during training and used at evaluation, smoothing both the validation curve and the final predictions. Several **stability-first** choices keep deep stacks well-behaved: a small fixed residual scale at initialization, no biases in the blocks, minimal weight decay on the Muon-routed projection weights, and a 5-epoch warmup before cosine decay. Both the architecture and the training recipe were arrived at via agent-driven exploration of the design space. See [the architecture docs](https://cherimoya.readthedocs.io/en/latest/architecture.html) for the full story.
 
 ### Installation
 
@@ -34,12 +34,12 @@ GPU acceleration requires Triton and a CUDA-capable device; a pure-PyTorch CPU f
 
 ### What you can do with Cherimoya
 
-- Train a sequence-to-function model on ChIP-seq, ATAC-seq, DNase-seq, PRO-seq, or any signal that can be expressed as a stranded or unstranded coverage track.
-- Compute per-base attribution scores via *in silico* saturation mutagenesis.
-- Call seqlets and discover *de novo* motifs with TF-MoDISco.
-- Annotate seqlets against a known motif database via tomtom-lite.
-- Marginalize the contribution of inserted motifs in counterfactual sequence designs.
-- Score variants by predicting their effects on the underlying profile and counts.
+- Train a sequence-to-function model on [TF ChIP-seq](https://cherimoya.readthedocs.io/en/latest/recipes/chipseq_tf.html), [ATAC-seq](https://cherimoya.readthedocs.io/en/latest/recipes/atacseq.html), [DNase-seq](https://cherimoya.readthedocs.io/en/latest/recipes/dnaseq.html), or any signal that can be expressed as a stranded or unstranded coverage track.
+- Compute per-base attribution scores via [*in silico* saturation mutagenesis](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html).
+- Call seqlets and discover *de novo* motifs with [TF-MoDISco](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html#tf-modisco-motif-discovery).
+- Annotate seqlets against a known motif database via [tomtom-lite](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html#tomtom-lite-annotation).
+- [Marginalize](https://cherimoya.readthedocs.io/en/latest/tutorials/variant_effect.html#motif-marginalization-cli) the contribution of inserted motifs in counterfactual sequence designs.
+- [Score variants](https://cherimoya.readthedocs.io/en/latest/tutorials/variant_effect.html) by predicting their effects on the underlying profile and counts.
 - Reproduce a training run bit-for-bit from a seed — the peak/negative sampler is a pure function of `(seed, epoch, index)`, and `num_workers > 1` is purely a speed optimization that produces the same batch sequence as `num_workers = 1`.
 - Stream remote BAM, BED, and FASTA inputs directly without downloading them first.
 
@@ -57,7 +57,7 @@ Each block performs a 3-tap dilated depthwise convolution, a per-example layer n
 | GPU, grad-enabled (training fwd) | 0.101 ms | 1.106 ms |
 | GPU, no_grad (inference megakernel) | **0.064 ms** | **0.583 ms** |
 
-All three paths agree on the model output to within ~1e-5 max-abs, so existing trained checkpoints produce numerically equivalent predictions through every path. The forward-only megakernel is automatically dispatched when gradients aren't needed; training is unaffected. CPU inference is comfortable for development and one-off evaluation on a laptop — only training and high-throughput inference benefit from a GPU. See [the benchmarks page](https://cherimoya.readthedocs.io/en/latest/benchmarks.html) for the full sweep across batch sizes and model widths.
+All three paths agree on the model output to within ~1e-5 max-abs, so existing trained checkpoints produce numerically equivalent predictions through every path. The forward-only megakernel is automatically dispatched when gradients aren't needed; training is unaffected. CPU inference is comfortable for development and one-off evaluation on a laptop — only training and high-throughput inference benefit from a GPU. See [the benchmarks page](https://cherimoya.readthedocs.io/en/latest/benchmarks.html) for measurement methodology and the script you can run on your own hardware.
 
 ### End-to-end CLI pipeline
 
@@ -65,21 +65,23 @@ All three paths agree on the model output to within ~1e-5 max-abs, so existing t
 
 The CLI strings the full pipeline — peak calling, signal extraction, training, attribution, seqlet calling, motif discovery — into a single reproducible run. Each step is parameterized through a JSON file, which serves both as a runtime config and a permanent record of what was run. The user-supplied JSON is merged with sensible defaults, so practical configs are short.
 
-**Step 1: generate a pipeline JSON from raw data pointers.** Provide a reference genome, one or more signal files, optional controls, a BED of positive loci, and a motif database. For stranded ChIP-seq:
+**Step 1: generate a pipeline JSON from raw data pointers.** Provide a reference genome, one or more signal files, optional controls, a BED of positive loci, and a motif database. For stranded ChIP-seq with input controls (full recipe [here](https://cherimoya.readthedocs.io/en/latest/recipes/chipseq_tf.html)):
 
 ```bash
 cherimoya pipeline-json \
-    -s hg38.fa -p peaks.bed.gz \
-    -i input1.bam -i input2.bam \
-    -c control1.bam -c control2.bam \
+    -s hg38.fa -p peaks.narrowPeak \
+    -i chipseq_rep1.bam -i chipseq_rep2.bam \
+    -c input_rep1.bam -c input_rep2.bam \
     -m JASPAR_2024.meme -n my_experiment -o pipeline.json
 ```
 
-For unstranded paired-end ATAC-seq with the standard +4/−4 fragment shift:
+Note: `-i` is the ChIP signal (IP reads) and `-c` is the unenriched-DNA input control.
+
+For unstranded paired-end ATAC-seq with the standard +4/−4 fragment shift (full recipe [here](https://cherimoya.readthedocs.io/en/latest/recipes/atacseq.html)):
 
 ```bash
 cherimoya pipeline-json \
-    -s hg38.fa -p peaks.bed.gz \
+    -s hg38.fa -p peaks.narrowPeak \
     -i fragments.bam -m JASPAR_2024.meme \
     -n atac_experiment -o pipeline.json \
     -ps 4 -ns -4 -u -f -pe
@@ -97,7 +99,7 @@ This calls peaks with MACS3, samples GC-matched negatives, trains a Cherimoya mo
 
 ### Python API and saving/loading
 
-For programmatic use, the three public symbols are `Cherimoya` (the model), `CheriBlock` (the building block), and `EMA` (the parameter exponential-moving-average wrapper used during training):
+For programmatic use, the three public symbols are `Cherimoya` (the model), `CheriBlock` (the building block), and `EMA` (the parameter exponential-moving-average wrapper used during training). See the [Python API tutorial](https://cherimoya.readthedocs.io/en/latest/tutorials/python_api.html) for an end-to-end training walkthrough:
 
 ```python
 from cherimoya import Cherimoya
@@ -114,11 +116,11 @@ model = Cherimoya.load("my_model.torch")              # CPU by default
 model = Cherimoya.load("my_model.torch", device="cuda")
 ```
 
-Older checkpoints saved with `torch.save(model, ...)` are not compatible with `Cherimoya.load` and must be retrained. The CLI subcommands and `model.fit(...)` use this format internally. See [the Python API docs](https://cherimoya.readthedocs.io/en/latest/api/model.html) for the full `fit()` and `predict()` signatures.
+Older checkpoints saved with `torch.save(model, ...)` are not compatible with `Cherimoya.load` and must be retrained. The CLI subcommands and `model.fit(...)` use this format internally. See [the save/load guide](https://cherimoya.readthedocs.io/en/latest/tutorials/save_load.html) for full semantics (including that the saved weights are the EMA snapshot) and [the Python API reference](https://cherimoya.readthedocs.io/en/latest/api/model.html) for the full `fit()` and `predict()` signatures.
 
 ### Documentation
 
-Full documentation, including tutorials, architecture details, and API reference, is at [cherimoya.readthedocs.io](https://cherimoya.readthedocs.io). The [changelog](https://cherimoya.readthedocs.io/en/latest/CHANGELOG.html) tracks user-visible changes between versions.
+Full documentation, including tutorials, architecture details, and API reference, is at [cherimoya.readthedocs.io](https://cherimoya.readthedocs.io). New to the terminology? See the [glossary](https://cherimoya.readthedocs.io/en/latest/glossary.html). Hitting an error? See the [troubleshooting page](https://cherimoya.readthedocs.io/en/latest/troubleshooting.html). The [changelog](https://cherimoya.readthedocs.io/en/latest/CHANGELOG.html) tracks user-visible changes between versions.
 
 ### Citation
 

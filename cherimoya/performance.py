@@ -316,23 +316,25 @@ def calculate_performance_measures(logps, true_counts, pred_log_counts,
 	its function, but this function provides a wrapper around running any
 	number of them. The measures one can choose are:
 
-		Profile Performance Measures
-		- "profile_mnll": the multinomial log-likelihood of the observed profile given
-			the predicted logits
-		- "profile_jsd": the Jensen-Shannon divergence between the observed profile and
-			the predicted probabilities
-		- "profile_pearson": the Pearson correlation between the observed profile and
-			the predicted probabilities
-		- "profile_spearman": the Spearman correlation between the observed profiles
-			and the predicted probabilities
+	Profile performance measures:
 
-		Count Performance Measures
-		- "count_pearson": the Pearson correlation between the observed log counts and
-			the predicted log counts
-		- "count_spearman": the Spearman correlation between the observed log counts
-			and the predicted log counts
-		- "count_mse": the mean-squared error between the observed log counts and the
-			predicted log counts.
+	- ``profile_mnll``: the multinomial log-likelihood of the observed
+	  profile given the predicted logits.
+	- ``profile_jsd``: the Jensen-Shannon divergence between the observed
+	  profile and the predicted probabilities.
+	- ``profile_pearson``: the Pearson correlation between the observed
+	  profile and the predicted probabilities.
+	- ``profile_spearman``: the Spearman correlation between the observed
+	  profiles and the predicted probabilities.
+
+	Count performance measures:
+
+	- ``count_pearson``: the Pearson correlation between the observed log
+	  counts and the predicted log counts.
+	- ``count_spearman``: the Spearman correlation between the observed
+	  log counts and the predicted log counts.
+	- ``count_mse``: the mean-squared error between the observed log
+	  counts and the predicted log counts.
 
 	Optionally, one can choose to smooth the *observed* data before calculating
 	the profile correlations and JSD. It is important to note that this smoothing
