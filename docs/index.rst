@@ -43,10 +43,13 @@ motif discovery in a single command.
    ``torch.compile(mode='max-autotune')`` by default, and some usage
    patterns (notably loading several model instances in one process)
    can trip the CUDA-graph runtime. Load with ``compile=False`` to
-   bypass it — forward outputs are numerically equivalent. See
-   :ref:`torch_compile_cudagraph_errors` for the full explanation and
-   examples. The same advice applies to any other ``torch.compile`` or
-   CUDA-graph error you don't immediately recognize: the safest fix is
+   bypass entirely, or with
+   ``compile_mode='max-autotune-no-cudagraphs'`` to keep autotuning
+   but drop the CUDA-graph capture. Forward outputs are numerically
+   equivalent in both cases. See :ref:`torch_compile_cudagraph_errors`
+   for the full explanation and examples. The same advice applies to
+   any other ``torch.compile`` or CUDA-graph error you don't
+   immediately recognize: the safest fix is
    ``Cherimoya.load(..., compile=False)``.
 
 

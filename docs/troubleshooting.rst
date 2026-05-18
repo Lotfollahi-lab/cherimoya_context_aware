@@ -229,6 +229,23 @@ the inference megakernel on recent GPUs, smaller on training. For
 multi-instance inference loops the speedup is moot anyway because
 the cache thrashes across instances.
 
+**Middle ground: keep autotuning, drop the CUDA graph.** If you want
+the autotuned kernels but not the CUDA-graph wrapping, pass
+``compile_mode='max-autotune-no-cudagraphs'``:
+
+.. code-block:: python
+
+   model = Cherimoya.load("checkpoint.torch", device="cuda",
+                          compile_mode='max-autotune-no-cudagraphs')
+
+This is the targeted fix for the specific cudagraph cache-overwrite
+error above: autotuning still runs (you keep most of the compile
+speedup), but there is no captured graph and so no buffer-reuse
+conflict across instances. ``compile_mode`` is forwarded directly to
+``torch.compile(mode=...)``, so any mode PyTorch accepts works here
+(e.g. ``'reduce-overhead'``, ``'default'``). When ``compile=False``
+the mode is ignored.
+
 **More general guidance.** Other ``torch.compile`` or CUDA-graph
 issues can surface depending on your PyTorch version, GPU
 architecture, and how aggressively a calling script reuses model
@@ -236,7 +253,9 @@ instances. **If you hit any** ``torch.compile`` **or CUDA-graph
 error you don't immediately recognize, the safest fix is to load
 the model with** ``compile=False``. You give up the compile speedup
 but keep the Triton inference kernel and full numerical parity, and
-you sidestep the entire class of compile/cudagraph foot-guns.
+you sidestep the entire class of compile/cudagraph foot-guns. If you
+specifically want to keep autotuning, try
+``compile_mode='max-autotune-no-cudagraphs'`` first.
 
 
 ``Cherimoya.load`` rejects a checkpoint

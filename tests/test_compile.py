@@ -61,6 +61,17 @@ def test_compile_default_value_in_signature():
 	assert sig.parameters['compile'].default is True
 
 
+def test_compile_mode_default_value_in_signature():
+	"""compile_mode defaults to 'max-autotune' on both __init__ and load.
+	The pre-2026-05 behavior was @torch.compile(mode='max-autotune'), so
+	this keeps the default identical."""
+	sig = inspect.signature(Cherimoya.__init__)
+	assert sig.parameters['compile_mode'].default == 'max-autotune'
+
+	sig = inspect.signature(Cherimoya.load)
+	assert sig.parameters['compile_mode'].default == 'max-autotune'
+
+
 # ---------------------------------------------------------------------------
 # 2. Opt-out works
 # ---------------------------------------------------------------------------
@@ -106,6 +117,84 @@ def test_load_accepts_compile_kwarg(tmp_path):
 								   loaded.named_parameters()):
 		assert n1 == n2
 		assert torch.equal(p1, p2)
+
+
+# ---------------------------------------------------------------------------
+# 2b. compile_mode kwarg
+# ---------------------------------------------------------------------------
+
+def test_compile_mode_stored_on_instance():
+	"""The mode passed in at construction is recorded on the instance so
+	that downstream code (and tests) can inspect what was actually used."""
+	m = Cherimoya(**_tiny_kwargs(),
+		compile_mode='max-autotune-no-cudagraphs')
+	assert m._compile_mode == 'max-autotune-no-cudagraphs'
+
+	m_default = Cherimoya(**_tiny_kwargs())
+	assert m_default._compile_mode == 'max-autotune'
+
+
+def test_compile_mode_alternate_constructs_and_runs():
+	"""Constructing with the no-cudagraphs variant should produce a
+	working forward. This is the practical escape valve called out in
+	the troubleshooting docs."""
+	m = Cherimoya(**_tiny_kwargs(),
+		compile_mode='max-autotune-no-cudagraphs').eval()
+	L = _input_window_for(m)
+	X = torch.randn(2, 4, L)
+	with torch.no_grad():
+		y_prof, y_count = m(X)
+	assert torch.isfinite(y_prof).all()
+	assert torch.isfinite(y_count).all()
+
+
+def test_compile_mode_ignored_when_compile_false():
+	"""When compile=False, the mode string is recorded but not used.
+	The forward should be the raw eager method, regardless of what
+	compile_mode says."""
+	m = Cherimoya(**_tiny_kwargs(), compile=False,
+		compile_mode='max-autotune-no-cudagraphs')
+	assert m._compile is False
+	# Same identity check as test_compile_false_skips_torch_compile —
+	# `_forward_fn` is the raw bound method, no torch.compile wrapping.
+	assert getattr(m._forward_fn, '__func__', None) is \
+		Cherimoya._forward_impl
+
+
+def test_load_accepts_compile_mode_kwarg(tmp_path):
+	"""`Cherimoya.load(..., compile_mode=...)` should round-trip weights
+	and record the requested mode."""
+	m = Cherimoya(**_tiny_kwargs()).eval()
+	p = tmp_path / 'm.torch'
+	m.save(str(p))
+
+	loaded = Cherimoya.load(str(p),
+		compile_mode='max-autotune-no-cudagraphs').eval()
+	assert loaded._compile is True
+	assert loaded._compile_mode == 'max-autotune-no-cudagraphs'
+	for (n1, p1), (n2, p2) in zip(m.named_parameters(),
+								   loaded.named_parameters()):
+		assert n1 == n2
+		assert torch.equal(p1, p2)
+
+
+def test_compile_mode_not_in_init_kwargs():
+	"""compile_mode is a runtime knob, not architecture. It must not
+	leak into checkpoints — otherwise newly-trained checkpoints would
+	pin a mode and conflict with the load-time kwarg."""
+	m = Cherimoya(**_tiny_kwargs(),
+		compile_mode='max-autotune-no-cudagraphs')
+	assert 'compile_mode' not in m._init_kwargs()
+
+
+def test_compile_mode_not_in_saved_checkpoint(tmp_path):
+	"""Same invariant as above, observed at the on-disk format level."""
+	m = Cherimoya(**_tiny_kwargs(),
+		compile_mode='max-autotune-no-cudagraphs')
+	p = tmp_path / 'm.torch'
+	m.save(str(p))
+	payload = torch.load(str(p), weights_only=True)
+	assert 'compile_mode' not in payload['config']
 
 
 # ---------------------------------------------------------------------------
