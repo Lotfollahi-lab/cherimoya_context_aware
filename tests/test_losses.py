@@ -6,21 +6,37 @@ import torch
 from cherimoya.losses import _mixture_loss
 
 
-def _toy_inputs(n=2, n_outputs=1, length=8, seed=0):
+def _toy_inputs(n=2, n_outputs=1, length=8, n_count_outputs=1, seed=0):
 	g = torch.Generator().manual_seed(seed)
 	y = torch.randint(0, 5, (n, n_outputs, length), generator=g).float()
 	y_hat_logits = torch.randn(n, n_outputs, length, generator=g)
-	y_hat_logcounts = torch.randn(n, 1, generator=g)
+	y_hat_logcounts = torch.randn(n, n_count_outputs, generator=g)
 	return y, y_hat_logits, y_hat_logcounts
 
 
-def test_mixture_loss_returns_two_finite_scalars():
+def test_mixture_loss_returns_per_track_vectors():
 	y, logits, logcounts = _toy_inputs()
 	profile_loss, count_loss = _mixture_loss(y, logits, logcounts)
-	assert profile_loss.shape == ()
-	assert count_loss.shape == ()
-	assert torch.isfinite(profile_loss)
-	assert torch.isfinite(count_loss)
+	assert profile_loss.shape == (1,)
+	assert count_loss.shape == (1,)
+	assert torch.isfinite(profile_loss).all()
+	assert torch.isfinite(count_loss).all()
+
+
+def test_mixture_loss_multi_track_shapes():
+	y, logits, logcounts = _toy_inputs(n_outputs=3, n_count_outputs=3)
+	profile_loss, count_loss = _mixture_loss(y, logits, logcounts)
+	assert profile_loss.shape == (3,)
+	assert count_loss.shape == (3,)
+
+
+def test_mixture_loss_shared_count_head():
+	# n_outputs=3 profile but a single shared count output: count loss
+	# is computed against the total count across all tracks.
+	y, logits, logcounts = _toy_inputs(n_outputs=3, n_count_outputs=1)
+	profile_loss, count_loss = _mixture_loss(y, logits, logcounts)
+	assert profile_loss.shape == (3,)
+	assert count_loss.shape == (1,)
 
 
 def test_mixture_loss_count_loss_zero_when_perfect_predictions():

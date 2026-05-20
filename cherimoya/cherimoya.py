@@ -169,12 +169,12 @@ class Cherimoya(torch.nn.Module):
 		self.fconv = torch.nn.Conv1d(n_filters+n_control_tracks, n_outputs,
 			kernel_size=1, padding=0)
 
-		self.lw0 = torch.nn.Parameter(torch.ones(1))
-		self.lw1 = torch.nn.Parameter(torch.ones(1))
-
 		n_count_control = 1 if n_control_tracks > 0 else 0
 		n_count_outputs = 1 if single_count_output else n_outputs
 		self.linear = torch.nn.Linear(n_filters+n_count_control, n_count_outputs)
+
+		self.lw0 = torch.nn.Parameter(torch.ones(n_outputs))
+		self.lw1 = torch.nn.Parameter(torch.ones(n_count_outputs))
 
 		torch.nn.init.trunc_normal_(self.iconv.weight, std=0.02)
 		torch.nn.init.trunc_normal_(self.fconv.weight, std=0.02)
@@ -482,10 +482,11 @@ class Cherimoya(torch.nn.Module):
 
 				w0 = (1.0 / (2.0 * self.lw0 ** 2))
 				w1 = (1.0 / (2.0 * self.lw1 ** 2))
-				loss = w0*profile_loss + w1*count_loss
+				loss = (w0 * profile_loss).sum() + (w1 * count_loss).sum()
 
 				if self.lw0.requires_grad == True:
-					loss += torch.sum(torch.log(self.lw0) ** 2 + torch.log(self.lw1) ** 2)
+					loss += (torch.log(self.lw0) ** 2).sum()
+					loss += (torch.log(self.lw1) ** 2).sum()
 
 				loss.backward()
 
@@ -501,7 +502,7 @@ class Cherimoya(torch.nn.Module):
 
 			train_time = time.time() - tic
 
-			if self.lw0.requires_grad == True and torch.abs(self.lw0.grad).sum() < 1:
+			if self.lw0.requires_grad == True and torch.abs(self.lw0.grad).mean() < 1:
 				self.lw0.requires_grad = False
 				self.lw1.requires_grad = False
 
@@ -518,7 +519,8 @@ class Cherimoya(torch.nn.Module):
 				valid_profile_loss, valid_count_loss = _mixture_loss(y_valid,
 					y_hat_logits, y_hat_logcounts)
 
-				valid_loss = w0*valid_profile_loss + w1*valid_count_loss
+				valid_loss = ((w0 * valid_profile_loss).sum()
+					+ (w1 * valid_count_loss).sum())
 
 				measures = calculate_performance_measures(y_hat_logits,
 					y_valid, y_hat_logcounts, measures=['profile_pearson', 'count_pearson'])
@@ -531,12 +533,12 @@ class Cherimoya(torch.nn.Module):
 					iteration,
 					train_time,
 					valid_time,
-					profile_loss.item(),
-					count_loss.item(),
-					valid_profile_loss.item(),
+					profile_loss.mean().item(),
+					count_loss.mean().item(),
+					valid_profile_loss.mean().item(),
 					valid_profile_corr.mean(),
 					valid_count_corr,
-					valid_count_loss.item(),
+					valid_count_loss.mean().item(),
 					(valid_count_corr > best_corr).item()])
 
 				self.logger.save("{}.log".format(self.name))

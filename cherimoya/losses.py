@@ -12,18 +12,19 @@ other code can implement different ways of combining them into a single loss.
 import torch
 
 from bpnetlite.losses import MNLLLoss
-from bpnetlite.losses import log1pMSELoss
 
 
 def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None):
 	"""A function that takes in predictions and truth and returns the loss.
-	
+
 	This function takes in the observed integer read counts, the predicted logits,
-	and the predicted logcounts, and returns the total loss. Importantly, this
-	calculates a single multinomial over all strands in the tracks and a single
-	count loss across all tracks.
-		
-	
+	and the predicted logcounts, and returns per-track profile and count losses.
+	Each track is treated as an independent multinomial along the length
+	dimension, and the count loss is computed per-track unless the count head
+	produces a single shared output (in which case it is computed on the total
+	count across tracks).
+
+
 	Parameters
 	----------
 	y: torch.Tensor, shape=(n, n_outputs, length)
@@ -35,9 +36,10 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None):
 		each position. This will be normalized internally, so DO NOT run a softmax
 		on your model.
 
-	y_hat_logcounts: torch.Tensor, shape=(n, n_outputs)
-		The predicted *log counts* for each example across each strand/output. The
-		true log counts will be derived automatically from `y`.
+	y_hat_logcounts: torch.Tensor, shape=(n, n_count_outputs)
+		The predicted *log counts* for each example. ``n_count_outputs`` is
+		either 1 (shared count head) or ``n_outputs`` (per-track count head);
+		the truth is derived from `y` accordingly.
 
 
 	labels: torch.Tensor, shape=(n,), optional
@@ -46,28 +48,38 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None):
 		will always be calculated on the entire set of examples. If not provided,
 		the profile loss will also be calculated on the entire set of examples.
 		Default is None.
-		
+
 
 	Returns
 	-------
-	profile_loss: torch.Tensor, shape=(1,)
-		The multinomial log likelihood loss averaged across examples and outputs.
+	profile_loss: torch.Tensor, shape=(n_outputs,)
+		The per-track multinomial log likelihood, averaged across examples.
 
-	count_loss: torch.Tensor, shape=(1,)
-		The mean-squared error loss, averaged across examples and outputs.
+	count_loss: torch.Tensor, shape=(n_count_outputs,)
+		The per-track mean-squared error on log(count+1), averaged across
+		examples.
 	"""
-	
-	y_hat_logits = y_hat_logits.reshape(y_hat_logits.shape[0], -1)
-	y_hat_logits = torch.nn.functional.log_softmax(y_hat_logits, dim=-1)
-	
-	y = y.reshape(y.shape[0], -1)
-	y_ = y.sum(dim=-1).reshape(y.shape[0], 1)
 
-	# Calculate the profile and count losses
-	if labels is not None:
-		profile_loss = MNLLLoss(y_hat_logits[labels == 1], y[labels == 1]).mean()
+	log_probs = torch.nn.functional.log_softmax(y_hat_logits, dim=-1)
+
+	# Per-track true counts: (n, n_outputs)
+	y_per_track = y.sum(dim=-1)
+
+	# Match the count head: collapse across tracks if the head is shared.
+	if y_hat_logcounts.shape[-1] == 1 and y_per_track.shape[-1] > 1:
+		y_ = y_per_track.sum(dim=-1, keepdim=True)
 	else:
-		profile_loss = MNLLLoss(y_hat_logits, y).mean()
+		y_ = y_per_track
 
-	count_loss = log1pMSELoss(y_hat_logcounts, y_).mean()	
+	# Profile loss: per-example per-track MNLL, then mean over examples.
+	if labels is not None:
+		mnll = MNLLLoss(log_probs[labels == 1], y[labels == 1])
+	else:
+		mnll = MNLLLoss(log_probs, y)
+	profile_loss = mnll.mean(dim=0)
+
+	# Count loss: per-example per-track squared error, then mean over examples.
+	count_sq_err = (torch.log(y_ + 1) - y_hat_logcounts) ** 2
+	count_loss = count_sq_err.mean(dim=0)
+
 	return profile_loss, count_loss
