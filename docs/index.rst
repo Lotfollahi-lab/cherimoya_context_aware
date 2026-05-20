@@ -74,7 +74,8 @@ Design highlights
   for everything else, with hyperparameters tuned via large-scale
   sweeps.
 * **Learned loss balancing**. Kendall-Gal uncertainty weighting with
-  two learnable scalars replaces a fixed profile/counts loss weight.
+  one learnable weight per output track replaces a fixed
+  profile/counts loss weight.
 * **EMA at evaluation**. An exponential moving average of the
   parameters is maintained during training and used at evaluation,
   smoothing both the validation curve and the final predictions.

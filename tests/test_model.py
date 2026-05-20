@@ -86,6 +86,54 @@ def test_n_outputs_and_control_tracks_shape():
 	assert model.fconv.in_channels == 8 + 2  # n_filters + n_control_tracks
 
 
+@pytest.mark.parametrize("n_outputs,single_count_output,expected_lw1", [
+	(1, True,  (1,)),   # single-task: back-compat with pre-vector checkpoints
+	(1, False, (1,)),   # single-task, per-track count head: same shape
+	(3, True,  (1,)),   # multi-track profile, shared count head
+	(3, False, (3,)),   # multi-track profile, per-track count head
+])
+def test_lw0_lw1_shapes(n_outputs, single_count_output, expected_lw1):
+	"""lw0 sizes with n_outputs (one weight per profile track); lw1 sizes
+	with the count-head output dim (1 when single_count_output=True else
+	n_outputs)."""
+
+	model = Cherimoya(n_filters=8, n_layers=2, n_outputs=n_outputs,
+		single_count_output=single_count_output, verbose=False)
+	assert model.lw0.shape == (n_outputs,)
+	assert model.lw1.shape == expected_lw1
+	# Both initialize to ones; the fit loop relies on this.
+	assert torch.allclose(model.lw0, torch.ones(n_outputs))
+	assert torch.allclose(model.lw1, torch.ones(*expected_lw1))
+
+
+@pytest.mark.parametrize("n_outputs,single_count_output", [
+	(1, True),    # the format every existing checkpoint was saved in
+	(3, False),
+	(3, True),
+])
+def test_lw0_lw1_save_load_round_trip(tmp_path, n_outputs, single_count_output):
+	"""Save/load preserves lw0/lw1 shapes and values across all
+	n_outputs / single_count_output combinations. The (1, True) case
+	also exercises back-compat with checkpoints saved before lw0/lw1
+	became vectors (where the state_dict already stored shape (1,))."""
+
+	model = Cherimoya(n_filters=8, n_layers=2, n_outputs=n_outputs,
+		single_count_output=single_count_output, verbose=False)
+	# Perturb the weights so the round-trip comparison is non-trivial.
+	with torch.no_grad():
+		model.lw0.add_(torch.randn_like(model.lw0) * 0.1)
+		model.lw1.add_(torch.randn_like(model.lw1) * 0.1)
+
+	path = tmp_path / "m.torch"
+	model.save(str(path))
+	loaded = Cherimoya.load(str(path), compile=False)
+
+	assert loaded.lw0.shape == model.lw0.shape
+	assert loaded.lw1.shape == model.lw1.shape
+	assert torch.allclose(loaded.lw0, model.lw0)
+	assert torch.allclose(loaded.lw1, model.lw1)
+
+
 def test_default_name_includes_filters_and_layers():
 	model = Cherimoya(n_filters=12, n_layers=4, verbose=False)
 	assert model.name == "cherimoya.12.4"

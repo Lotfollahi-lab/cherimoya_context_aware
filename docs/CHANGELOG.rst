@@ -29,6 +29,16 @@ Model
   recomputes the cast inline per call (adds ~10-27% at small batch,
   under ~2% at production batch). See :doc:`benchmarks` for the
   breakdown.
+* Generalized the Kendall-Gal loss-weight parameters ``lw0`` and
+  ``lw1`` from scalars to per-track vectors. ``lw0`` is now shape
+  ``(n_outputs,)`` (one weight per profile track) and ``lw1`` is shape
+  ``(n_count_outputs,)`` (one weight per count-head output). For
+  single-task models both shapes are ``(1,)``, matching the format of
+  every pre-vector checkpoint — existing single-task checkpoints load
+  without changes. The freeze threshold now uses
+  ``|grad(lw0)|.mean() < 1`` so it doesn't scale with track count.
+  ``_mixture_loss`` correspondingly returns per-track loss vectors
+  instead of scalars.
 * The training Triton kernel and the CPU fallback are unchanged.
   Existing trained checkpoints are bit-compatible.
 * Replaced the learnable channel-wise scaling with a fixed

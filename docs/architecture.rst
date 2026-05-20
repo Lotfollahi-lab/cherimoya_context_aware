@@ -109,8 +109,9 @@ Block's depthwise conv and two linear projections, the 1×1 profile
 head, and the count-head linear layer — is initialized with
 ``trunc_normal_(std=0.02)``. The biases that exist (input stem, profile
 head, count head) are zero-initialized. The Cheri Block layers
-themselves have no biases. The Kendall-Gal loss-weight scalars
-(``lw0``, ``lw1``) are initialized to 1.
+themselves have no biases. The Kendall-Gal loss-weight tensors
+``lw0`` (shape ``(n_outputs,)``) and ``lw1`` (shape
+``(n_count_outputs,)``) are initialized to ones.
 
 This small fixed init combined with the fixed ``residual_scale=0.15``
 on each Cheri Block keeps the per-block contribution to the residual
@@ -184,20 +185,27 @@ Cherimoya uses a two-component loss:
   ``log(1 + total_counts)``.
 
 These are combined using **Kendall-Gal uncertainty weighting** with
-two learnable scalars ``lw0`` and ``lw1``:
+one learnable weight per output track: ``lw0`` of shape
+``(n_outputs,)`` weights the per-track profile losses, and ``lw1`` of
+shape ``(n_count_outputs,)`` weights the per-track count losses
+(where ``n_count_outputs`` is 1 when ``single_count_output=True``
+else ``n_outputs``). For single-task models both tensors are shape
+``(1,)``, matching the shape stored in every pre-vector checkpoint.
 
 .. code-block:: python
 
-   w0 = 1.0 / (2.0 * self.lw0 ** 2)
-   w1 = 1.0 / (2.0 * self.lw1 ** 2)
-   loss = w0 * profile_loss + w1 * count_loss
+   w0 = 1.0 / (2.0 * self.lw0 ** 2)            # shape (n_outputs,)
+   w1 = 1.0 / (2.0 * self.lw1 ** 2)            # shape (n_count_outputs,)
+   loss = (w0 * profile_loss).sum() + (w1 * count_loss).sum()
    if self.lw0.requires_grad:
-       loss += (torch.log(self.lw0) ** 2 + torch.log(self.lw1) ** 2).sum()
+       loss += (torch.log(self.lw0) ** 2).sum()
+       loss += (torch.log(self.lw1) ** 2).sum()
 
-The log-squared regularizer prevents either scalar from running to
-zero. Once their gradients become negligible (``|grad(lw0)|.sum() < 1``
-at the end of an epoch), both scalars are frozen for the rest of
-training.
+The log-squared regularizer prevents either weight from running to
+zero. Once the per-element gradient becomes negligible
+(``|grad(lw0)|.mean() < 1`` at the end of an epoch — averaging keeps
+the threshold independent of the number of tracks), both tensors are
+frozen for the rest of training.
 
 
 Training strategy
@@ -212,7 +220,7 @@ on shape and naming:
   Block.
 * **AdamW** receives everything else: the input/output convolutions,
   the depthwise conv weight inside each Cheri Block, the count head's
-  linear layer, the bias terms, and the loss-weight scalars
+  linear layer, the bias terms, and the loss-weight tensors
   (``lw0``, ``lw1``).
 
 Default learning rates and weight decays:
