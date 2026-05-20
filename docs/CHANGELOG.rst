@@ -15,6 +15,20 @@ Model
   path otherwise. Numerically equivalent to the training path within
   ~1e-5 max-abs at unit-scale outputs, and roughly 1.9× faster than
   the training-fwd path on H200 at the default model size.
+* The inference megakernel's bf16 weight cast is now materialized at
+  ``.eval()`` time as non-persistent buffers and refreshed by a
+  ``load_state_dict`` post-hook, instead of cached inside the
+  compiled forward. This fixes a
+  ``RuntimeError: accessing tensor output of CUDAGraphs that has been
+  overwritten`` that previously surfaced when running multiple model
+  instances or reloading weights mid-process, and removes the need
+  for ``compile=False`` / ``compile_mode='max-autotune-no-cudagraphs'``
+  as a workaround for that specific error. **User-visible
+  consequence:** call ``model.eval()`` before inference to hit the
+  fast path; the megakernel still runs without ``.eval()`` but
+  recomputes the cast inline per call (adds ~10-27% at small batch,
+  under ~2% at production batch). See :doc:`benchmarks` for the
+  breakdown.
 * The training Triton kernel and the CPU fallback are unchanged.
   Existing trained checkpoints are bit-compatible.
 * Replaced the learnable channel-wise scaling with a fixed

@@ -177,85 +177,60 @@ running ``cherimoya pipeline``.
 
 .. _torch_compile_cudagraph_errors:
 
-``torch.compile`` / CUDA graphs errors at inference time
---------------------------------------------------------
+``torch.compile`` / CUDA-graph errors at inference time
+-------------------------------------------------------
 
-Symptom: an inference script raises one of
+Symptom: an inference script raises a ``torch._dynamo`` /
+``torch._inductor`` traceback originating from inside
+``Cherimoya.forward``, or a CUDA-graph runtime error such as
+``accessing tensor output of CUDAGraphs that has been overwritten
+by a subsequent run``.
 
-* ``RuntimeError: Error: accessing tensor output of CUDAGraphs that
-  has been overwritten by a subsequent run.``
-* a less specific ``torch._dynamo`` / ``torch._inductor`` traceback
-  originating from inside ``Cherimoya.forward``.
+:class:`cherimoya.Cherimoya` wraps its forward in
+``torch.compile(mode='max-autotune')`` by default, which captures a
+CUDA graph and reuses preallocated buffer slots across calls. This
+is fast but can interact unhappily with caller code that holds
+references across calls, mixes graph and non-graph allocators, or
+hits an inductor edge case for a specific PyTorch version.
 
-By default :class:`cherimoya.Cherimoya` wraps its forward pass in
-``torch.compile(mode='max-autotune')``, which captures a CUDA graph
-and reuses preallocated buffer slots across calls. A small tensor
-cache inside the inference kernels (used to hold the cast MLP
-weights) can end up referencing those graph buffers, and certain
-usage patterns then trip the CUDA-graph runtime's overwrite guard.
-The two patterns that surface this in practice are:
-
-* **Loading multiple Cherimoya instances in one process and calling
-  them in sequence** (e.g. running all five folds of a comprehensive
-  model on the same loci). The shared compiled forward sees a cache
-  miss on the second instance and tries to reuse a buffer the first
-  instance is still holding.
-* **Loading one instance, then re-loading or re-initializing weights
-  in-place**, then calling forward again. The same buffer-reuse path
-  triggers.
-
-**Fix: load without compile.** Both the class constructor and
-:meth:`Cherimoya.load` accept ``compile=False``, which skips
-``torch.compile`` and uses the eager forward path:
+If you hit any such error, two opt-outs are available, both
+numerically equivalent to the default:
 
 .. code-block:: python
 
    from cherimoya import Cherimoya
 
-   # When loading a trained checkpoint
+   # Full bypass: eager forward, no torch.compile at all.
    model = Cherimoya.load("checkpoint.torch", device="cuda",
                           compile=False)
 
-   # When constructing a fresh model
-   model = Cherimoya(n_filters=96, n_layers=9, compile=False)
-
-The eager path still goes through Cherimoya's Triton inference
-kernels — only the ``torch.compile`` wrapping is dropped — so forward
-outputs are numerically equivalent. The test suite verifies parity at
-``atol=rtol=1e-4`` between ``compile=True`` and ``compile=False``.
-
-The performance cost is the compile speedup: typically ~10-20% on
-the inference megakernel on recent GPUs, smaller on training. For
-multi-instance inference loops the speedup is moot anyway because
-the cache thrashes across instances.
-
-**Middle ground: keep autotuning, drop the CUDA graph.** If you want
-the autotuned kernels but not the CUDA-graph wrapping, pass
-``compile_mode='max-autotune-no-cudagraphs'``:
-
-.. code-block:: python
-
+   # Targeted: keep autotuned kernels, skip the CUDA-graph capture.
    model = Cherimoya.load("checkpoint.torch", device="cuda",
                           compile_mode='max-autotune-no-cudagraphs')
 
-This is the targeted fix for the specific cudagraph cache-overwrite
-error above: autotuning still runs (you keep most of the compile
-speedup), but there is no captured graph and so no buffer-reuse
-conflict across instances. ``compile_mode`` is forwarded directly to
-``torch.compile(mode=...)``, so any mode PyTorch accepts works here
-(e.g. ``'reduce-overhead'``, ``'default'``). When ``compile=False``
-the mode is ignored.
+``compile_mode`` is forwarded directly to ``torch.compile(mode=...)``,
+so any mode PyTorch accepts works (``'reduce-overhead'``,
+``'default'``, etc.). When ``compile=False`` the mode is ignored.
+Both opt-outs still go through Cherimoya's Triton inference kernels;
+only the ``torch.compile`` wrapping changes. The test suite verifies
+parity at ``atol=rtol=1e-4`` between ``compile=True`` and
+``compile=False``.
 
-**More general guidance.** Other ``torch.compile`` or CUDA-graph
-issues can surface depending on your PyTorch version, GPU
-architecture, and how aggressively a calling script reuses model
-instances. **If you hit any** ``torch.compile`` **or CUDA-graph
-error you don't immediately recognize, the safest fix is to load
-the model with** ``compile=False``. You give up the compile speedup
-but keep the Triton inference kernel and full numerical parity, and
-you sidestep the entire class of compile/cudagraph foot-guns. If you
-specifically want to keep autotuning, try
-``compile_mode='max-autotune-no-cudagraphs'`` first.
+The performance cost is the compile speedup itself: typically
+~10-20% on the inference megakernel on recent GPUs, smaller on
+training. **If you don't immediately recognize a** ``torch.compile``
+**or CUDA-graph error, the safest fix is** ``compile=False`` — it
+sidesteps the entire class of compile/cudagraph foot-guns at the
+cost of that speedup.
+
+.. note::
+
+   For the megakernel to hit its fast path (precomputed bf16 weight
+   cast reused across calls), call ``model.eval()`` before inference.
+   Without ``.eval()`` the megakernel still runs correctly, but it
+   recomputes the cast on every call — adding ~10-27% latency at small
+   batch sizes and under ~2% at production batch sizes. See
+   :doc:`benchmarks` for the breakdown.
 
 
 ``Cherimoya.load`` rejects a checkpoint

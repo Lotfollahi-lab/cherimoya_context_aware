@@ -190,6 +190,17 @@ class Cherimoya(torch.nn.Module):
 			"Validation Count Pearson", "Validation Count MSE", "Saved?"],
 			verbose=verbose)
 
+		# After load_state_dict completes (and the full recursion has
+		# updated every nested CheriBlock's Linear weights), refresh
+		# each block's eval-time bf16 weight cache if we're in eval
+		# mode. This makes `model.eval(); model.load_state_dict(...)`
+		# work as expected for the inference megakernel path.
+		def _refresh_block_caches(module, _keys):
+			for block in module.blocks:
+				if not block.training:
+					block.train(False)
+		self.register_load_state_dict_post_hook(_refresh_block_caches)
+
 		# Compile is opt-out via the `compile` kwarg, and the compile mode
 		# is configurable via `compile_mode` (passed through to
 		# `torch.compile(mode=...)`). Both are runtime knobs, not

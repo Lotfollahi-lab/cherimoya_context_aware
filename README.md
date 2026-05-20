@@ -9,20 +9,6 @@
 > [!IMPORTANT]
 > Cherimoya is under active development and may introduce breaking changes between versions. Pin the version you train with if you need to reload checkpoints later.
 
-> [!WARNING]
-> **Hitting a `torch.compile` or CUDA-graphs error at inference time?** Cherimoya's forward is wrapped in `torch.compile(mode='max-autotune')` by default, and some usage patterns (notably loading several model instances in one process) can trip the CUDA-graph runtime with errors like `accessing tensor output of CUDAGraphs that has been overwritten`. Two escape hatches, both numerically equivalent to the default:
->
-> ```python
-> # Full bypass: eager forward, no torch.compile at all
-> model = Cherimoya.load("checkpoint.torch", device="cuda", compile=False)
->
-> # Targeted fix: keep autotuning, drop the CUDA-graph capture
-> model = Cherimoya.load("checkpoint.torch", device="cuda",
->                        compile_mode='max-autotune-no-cudagraphs')
-> ```
->
-> `compile_mode` is forwarded directly to `torch.compile(mode=...)`, so any mode PyTorch accepts works. See the [troubleshooting page](https://cherimoya.readthedocs.io/en/latest/troubleshooting.html#torch-compile-cuda-graphs-errors-at-inference-time) for the full explanation. **For any other `torch.compile` or CUDA-graph error you don't immediately recognize, the safest fix is `Cherimoya.load(..., compile=False)`** — you give up the compile speedup but keep the Triton inference kernel and full numerical parity.
-
 Cherimoya is a compact deep learning model for predicting genomic profile data — transcription factor binding, chromatin accessibility, transcription initiation — directly from DNA sequence. It pairs a lightweight ConvNeXt-style backbone with custom Triton GPU kernels for both training and inference, and ships with an end-to-end CLI that takes BAM files through peak calling, training, attribution, and motif discovery in a single command. The default 9-layer model is **~340K parameters** and runs a full forward in **well under a millisecond per batch on an H200**, while delivering strong predictive performance across the assays we've benchmarked.
 
 <img src="https://github.com/jmschrei/cherimoya/blob/main/imgs/cheri-model.png">
@@ -65,13 +51,15 @@ Each block performs a 3-tap dilated depthwise convolution, a per-example layer n
 
 ### Performance
 
-| Path | Single block (N=16, L=1024, C=96) | Full Cherimoya (N=4, L=2114, default) |
-|---|---|---|
-| CPU (pure PyTorch) | 4.71 ms | 21.92 ms |
-| GPU, grad-enabled (training fwd) | 0.101 ms | 1.106 ms |
-| GPU, no_grad (inference megakernel) | **0.064 ms** | **0.583 ms** |
+Per-call latency (ms) on an NVIDIA H200 for a single Cheri Block at `N=512, L=1024, C=96, dilation=4`. The inference megakernel is automatically dispatched under `torch.no_grad()`; calling `.eval()` first lets it reuse a precomputed bf16 weight cast across calls instead of recomputing every call. At this batch size the eval cache adds only ~1–2% — it matters more at small batches.
 
-All three paths agree on the model output to within ~1e-5 max-abs, so existing trained checkpoints produce numerically equivalent predictions through every path. The forward-only megakernel is automatically dispatched when gradients aren't needed; training is unaffected. CPU inference is comfortable for development and one-off evaluation on a laptop — only training and high-throughput inference benefit from a GPU. See [the benchmarks page](https://cherimoya.readthedocs.io/en/latest/benchmarks.html) for measurement methodology and the script you can run on your own hardware.
+| dtype | training-fwd | megakernel + `.eval()` | megakernel, no `.eval()` |
+|---|---|---|---|
+| fp32 | 1.043 | **0.415** | 0.425 (+2%) |
+| bf16 | 0.548 | **0.300** | 0.302 (+1%) |
+| fp16 | 0.547 | **0.297** | 0.301 (+1%) |
+
+All paths agree on the fp32 model output to within ~1e-5 max-abs, so existing trained checkpoints produce numerically equivalent predictions through training-fwd and the megakernel paths. Training is unaffected by the eval cache — the megakernel only fires under no_grad. A pure-PyTorch CPU fallback is also available for development and one-off evaluation on a laptop; only training and high-throughput inference benefit from a GPU. See [the benchmarks page](https://cherimoya.readthedocs.io/en/latest/benchmarks.html) for small-batch breakdowns, full methodology, and the script you can run on your own hardware.
 
 ### End-to-end CLI pipeline
 

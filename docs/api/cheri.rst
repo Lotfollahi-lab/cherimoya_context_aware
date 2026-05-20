@@ -133,10 +133,18 @@ lives under the ``_fwd_inf_`` prefix in
 ``cherimoya/cheri.py``. It is not part of the public API, but the
 behavior is observable:
 
-* The bf16 cast of the linear weights is keyed by ``(id, _version)``
-  on both parameters, so any in-place update (including
-  ``load_state_dict``) invalidates the cache automatically.
-* The cache lives on the ``CheriBlock`` instance
-  (``CheriBlock._w_cache``) and is **not** part of the state dict.
+* The bf16 cast of the linear weights is materialized at ``.eval()``
+  time as three non-persistent buffers (``_w1_eval_bf16``,
+  ``_w2_eval_bf16``, ``_w2_eval_native``) so it lives outside the
+  compiled forward and survives ``torch.compile`` cudagraph
+  replays. Calling ``.train(True)`` clears the cache;
+  ``load_state_dict`` while in eval mode refreshes it via a post-hook.
+* The buffers are registered with ``persistent=False`` and so are
+  **not** part of the state dict.
+* If the inference path is reached under ``no_grad`` *without* a
+  prior ``.eval()`` call, the megakernel still fires correctly; it
+  just recomputes the bf16 cast inline per call. See
+  :doc:`/benchmarks` for the per-call cost.
 * The path produces outputs that differ from the training Triton
-  path by at most ~1e-5 max-abs at unit-scale outputs.
+  path by at most ~1e-5 max-abs at unit-scale fp32 outputs (~1e-2
+  for bf16 input, ~1e-3 for fp16 input).

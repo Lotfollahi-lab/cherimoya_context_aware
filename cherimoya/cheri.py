@@ -864,15 +864,53 @@ class CheriBlock(torch.nn.Module):
 		torch.nn.init.trunc_normal_(self.linear1.weight, std=0.02)
 		torch.nn.init.trunc_normal_(self.linear2.weight, std=0.02)
 
-		# Inference-path weight cache. Plain dict (not a buffer, not in
-		# state_dict). Keyed by target dot dtype; the value is a tuple
-		# (cache_key, w1_cast, w2_cast_with_scale). The cache_key
-		# combines (id, _version) of both Linear weights, so the cache
-		# invalidates automatically after load_state_dict (in-place
-		# data.copy_ bumps _version) or any in-place optimizer update.
-		# residual_scale is treated as immutable and is folded into
-		# w2 at cast time.
-		self._w_cache = {}
+		# Eval-time weight caches, materialized at .eval() time and cleared
+		# at .train() time. Non-persistent buffers so they move with
+		# .to(device) but stay out of state_dict. The inference megakernel
+		# reads these as stable inputs (they live outside the compiled
+		# region), avoiding the cudagraph cache-overwrite pattern that an
+		# in-graph cache would trigger.
+		#   _w1_eval_bf16, _w2_eval_bf16: bf16 casts, used when X is fp32
+		#       (megakernel downcasts the MLP dot to bf16 for fp32 input).
+		#   _w2_eval_native: linear2.weight * residual_scale at the param's
+		#       native dtype, used when X.dtype matches the parameters
+		#       (X stays in the native dtype through the MLP). Avoids the
+		#       per-call multiply that the inline cast would otherwise do.
+		self.register_buffer('_w1_eval_bf16', None, persistent=False)
+		self.register_buffer('_w2_eval_bf16', None, persistent=False)
+		self.register_buffer('_w2_eval_native', None, persistent=False)
+
+		# Refresh the eval cache after this block's parameters are
+		# loaded directly via load_state_dict (standalone CheriBlock
+		# use). When the block is nested inside Cherimoya, the parent's
+		# own post-hook handles the refresh after the full recursion.
+		def _refresh(m, _keys):
+			if not m.training:
+				m.train(False)
+		self.register_load_state_dict_post_hook(_refresh)
+
+	def train(self, mode=True):
+		"""Set training mode and (un)populate the eval-time bf16 cache.
+
+		Entering eval mode materializes bf16 casts of the MLP weights
+		so the inference megakernel can read them as stable inputs.
+		Entering train mode clears them. A ``load_state_dict`` call
+		while in eval mode automatically refreshes the cache via the
+		post-hook registered in ``__init__``.
+		"""
+
+		super().train(mode)
+		if mode:
+			self._w1_eval_bf16 = None
+			self._w2_eval_bf16 = None
+			self._w2_eval_native = None
+		else:
+			with torch.no_grad():
+				w2_folded = self.linear2.weight * self.residual_scale
+				self._w1_eval_bf16 = self.linear1.weight.to(torch.bfloat16)
+				self._w2_eval_bf16 = w2_folded.to(torch.bfloat16)
+				self._w2_eval_native = w2_folded
+		return self
 
 	def _can_use_inference_path(self, X):
 		"""Return True iff the no_grad fused inference kernel can be used
@@ -888,25 +926,35 @@ class CheriBlock(torch.nn.Module):
 			and hidden % 16 == 0)
 
 	def _cast_weights(self, X):
-		"""Cast the MLP weights to the dot dtype and fold residual_scale
-		into the second weight, caching the result. The cache key
-		combines parameter identity and `_version` so any in-place
-		update (load_state_dict, optimizer step) invalidates it.
+		"""Return the MLP weights cast to the dot dtype, with
+		residual_scale folded into the second weight.
+
+		In eval mode the cast is precomputed at ``train(False)`` time and
+		read from a non-persistent buffer — the tensors live outside the
+		compiled region so they survive cudagraph replays. Two cache
+		entries cover the common cases:
+
+		- fp32 input (params fp32 → bf16 dot): returns the bf16 casts.
+		- input dtype matches param dtype (e.g. bf16 model + bf16 input):
+		  returns the parameter directly for w1 and the precomputed
+		  residual-folded buffer for w2.
+
+		Any other case falls back to an inline cast.
 
 		For fp32 input we downcast to bf16: roughly 2x dot throughput on
 		Hopper at the cost of ~1e-2 max-abs precision loss vs the
-		training path. To keep fp32 dots for fp32 input, change the
-		first line below to `dt = X.dtype` unconditionally."""
+		training path."""
+
+		if X.dtype == torch.float32 and self._w1_eval_bf16 is not None:
+			return self._w1_eval_bf16, self._w2_eval_bf16
+
+		if (self._w2_eval_native is not None
+			and X.dtype == self.linear1.weight.dtype):
+			return self.linear1.weight, self._w2_eval_native
 
 		dt = torch.bfloat16 if X.dtype == torch.float32 else X.dtype
-		w1_p, w2_p = self.linear1.weight, self.linear2.weight
-		key = (id(w1_p), w1_p._version, id(w2_p), w2_p._version)
-		entry = self._w_cache.get(dt)
-		if entry is not None and entry[0] == key:
-			return entry[1], entry[2]
-		w1 = w1_p.to(dt)
-		w2 = (w2_p * self.residual_scale).to(dt)
-		self._w_cache[dt] = (key, w1, w2)
+		w1 = self.linear1.weight.to(dt)
+		w2 = (self.linear2.weight * self.residual_scale).to(dt)
 		return w1, w2
 
 	def forward(self, X):
