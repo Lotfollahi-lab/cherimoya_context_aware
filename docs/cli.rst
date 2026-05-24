@@ -292,9 +292,6 @@ Unspecified keys fall back to the fit-level defaults.
    * - ``num_workers``
      - 1
      - Async prefetch workers for the data loader.
-   * - ``single_count_output``
-     - ``true``
-     - One scalar count per example vs. one per output track.
    * - ``early_stopping``
      - 15
      - Stop after N consecutive epochs with no validation count

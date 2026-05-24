@@ -74,8 +74,8 @@ The steps mirror the ChIP-seq recipe, with these differences:
 * ``bam2bw`` is invoked with the ``-u`` (unstranded), ``-f``
   (fragments), and ``-ps 4 -ns -4`` flags, producing a single
   ``atac_experiment.bw`` rather than ``+.bw`` / ``-.bw`` pair.
-* The trained Cherimoya model has ``n_outputs=1`` and
-  ``n_control_tracks=0``.
+* The trained Cherimoya model has ``signal_groups=[1]`` (one
+  unstranded group) and ``n_control_tracks=0``.
 * Attribution, seqlet calling, TF-MoDISco, and marginalization run
   the same way they do for ChIP-seq.
 

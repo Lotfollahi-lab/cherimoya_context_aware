@@ -95,6 +95,12 @@ The most common causes, in order:
    passed only one bigWig (or vice versa) the loaded ``y`` will have
    the wrong shape. Verify by setting ``verbose=True`` and inspecting
    the training-set and validation-set shapes printed at startup.
+
+   Also confirm that a stranded ``(+, -)`` pair is wrapped as a single
+   inner list — e.g. ``signals=[["plus.bw", "minus.bw"]]`` — rather
+   than passed flat. A flat two-element list is now interpreted as
+   two *independent* unstranded tracks, which silently disables the
+   ``(+, -)`` swap during reverse-complement augmentation.
 3. **bf16 overflow in the count head**. If you use ``dtype="bfloat16"``
    and the per-locus counts are very large, the log-counts loss can
    overflow. Fall back to ``"float32"`` to confirm; if that fixes it,

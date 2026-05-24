@@ -14,7 +14,7 @@ Saving
 
    from cherimoya import Cherimoya
 
-   model = Cherimoya(n_filters=96, n_layers=9, n_outputs=1)
+   model = Cherimoya(n_filters=96, n_layers=9, signal_groups=[1])
    # ... train ...
    model.save("my_model.torch")
 

@@ -33,11 +33,12 @@ The model consists of three stages.
    ``(N, L, C)`` and are the heart of the model.
 
 3. **Output heads**. A 1×1 pointwise convolution produces the profile
-   prediction over the trimmed output window. A linear layer over the
+   prediction over the trimmed output window — one channel per signal
+   channel (``sum(signal_groups)`` total). A linear layer over the
    mean-pooled backbone features (also restricted to the trimmed output
-   window) produces the count prediction. The count head can be either a
-   single scalar per example (``single_count_output=True``, the
-   default) or one count per output track.
+   window) produces the count prediction — one prediction per signal
+   *group* (``len(signal_groups)`` total). A stranded ``(+, -)`` pair is
+   one group, so its two strands share a single count target.
 
 The default 9-layer, 96-filter model has roughly 340K parameters. The
 default input window is 2114 bp and the default output window is 1000
@@ -110,8 +111,9 @@ head, and the count-head linear layer — is initialized with
 ``trunc_normal_(std=0.02)``. The biases that exist (input stem, profile
 head, count head) are zero-initialized. The Cheri Block layers
 themselves have no biases. The Kendall-Gal loss-weight tensors
-``lw0`` (shape ``(n_outputs,)``) and ``lw1`` (shape
-``(n_count_outputs,)``) are initialized to ones.
+``lw0`` (shape ``(sum(signal_groups),)`` — one per profile channel)
+and ``lw1`` (shape ``(len(signal_groups),)`` — one per count-head
+output, i.e. one per signal group) are initialized to ones.
 
 This small fixed init combined with the fixed ``residual_scale=0.15``
 on each Cheri Block keeps the per-block contribution to the residual
@@ -176,26 +178,27 @@ Loss design
 
 Cherimoya uses a two-component loss:
 
-* **Profile loss**: Multinomial negative log-likelihood (MNLL) over the
-  base-pair resolution profile predictions, computed on the flattened
-  ``(strand × length)`` axis so a single multinomial is fit across all
-  strands.
+* **Profile loss**: Multinomial negative log-likelihood (MNLL),
+  computed per profile channel along the length axis (one multinomial
+  per output channel — ``sum(signal_groups)`` total).
 
 * **Counts loss**: ``log1pMSE`` between predicted log counts and
-  ``log(1 + total_counts)``.
+  ``log(1 + total_counts)``, computed per signal *group*. A stranded
+  ``(+, -)`` pair contributes a single per-group count target equal
+  to the sum of both strands' counts.
 
 These are combined using **Kendall-Gal uncertainty weighting** with
-one learnable weight per output track: ``lw0`` of shape
-``(n_outputs,)`` weights the per-track profile losses, and ``lw1`` of
-shape ``(n_count_outputs,)`` weights the per-track count losses
-(where ``n_count_outputs`` is 1 when ``single_count_output=True``
-else ``n_outputs``). For single-task models both tensors are shape
-``(1,)``, matching the shape stored in every pre-vector checkpoint.
+two learnable weight tensors: ``lw0`` of shape
+``(sum(signal_groups),)`` weights the per-channel profile losses, and
+``lw1`` of shape ``(len(signal_groups),)`` weights the per-group count
+losses. For single-task models (``signal_groups=[1]``) both tensors
+are shape ``(1,)``, matching the shape stored in every pre-vector
+checkpoint.
 
 .. code-block:: python
 
-   w0 = 1.0 / (2.0 * self.lw0 ** 2)            # shape (n_outputs,)
-   w1 = 1.0 / (2.0 * self.lw1 ** 2)            # shape (n_count_outputs,)
+   w0 = 1.0 / (2.0 * self.lw0 ** 2)            # shape (sum(signal_groups),)
+   w1 = 1.0 / (2.0 * self.lw1 ** 2)            # shape (len(signal_groups),)
    loss = (w0 * profile_loss).sum() + (w1 * count_loss).sum()
    if self.lw0.requires_grad:
        loss += (torch.log(self.lw0) ** 2).sum()

@@ -116,15 +116,6 @@ class Cherimoya(torch.nn.Module):
 		prediction per *group* (total ``len(signal_groups)``). Default
 		is ``[1]`` — a single unstranded track.
 
-	n_outputs: int, optional, DEPRECATED
-		Provided only as a back-compat shorthand for callers and old
-		checkpoints written before ``signal_groups`` existed. When given
-		without ``signal_groups``, this is interpreted as
-		``signal_groups=[1] * n_outputs`` — i.e. every output channel is
-		its own unstranded group. Mutually exclusive with
-		``signal_groups`` (passing both raises if they disagree).
-		Default is None.
-
 	n_control_tracks: int, optional
 		Number of control input tracks (the total channel count
 		summed across all control groups, if any). If 0, the model
@@ -154,31 +145,18 @@ class Cherimoya(torch.nn.Module):
 	"""
 
 	def __init__(self, n_filters=96, n_layers=9, signal_groups=None,
-		n_outputs=None, n_control_tracks=0, expansion=2,
-		residual_scale=0.15, name=None, trimming=None,
-		verbose=True, compile=True, compile_mode='max-autotune'):
+		n_control_tracks=0, expansion=2, residual_scale=0.15, name=None,
+		trimming=None, verbose=True, compile=True,
+		compile_mode='max-autotune'):
 		super(Cherimoya, self).__init__()
 
-		# Resolve signal_groups vs the legacy n_outputs shorthand. The
-		# legacy form (n_outputs only) is interpreted as "n_outputs
-		# independent unstranded groups" — matching the new flat-list
-		# default in the data pipeline and the format every pre-grouping
-		# checkpoint was saved in.
 		if signal_groups is None:
-			if n_outputs is None:
-				signal_groups = [1]
-			else:
-				signal_groups = [1] * int(n_outputs)
-		else:
-			signal_groups = list(signal_groups)
-			if any((not isinstance(g, int)) or g < 1 for g in signal_groups):
-				raise ValueError(
-					"signal_groups must be a list of positive ints; got {!r}"
-					.format(signal_groups))
-			if n_outputs is not None and int(n_outputs) != sum(signal_groups):
-				raise ValueError(
-					"n_outputs ({}) disagrees with sum(signal_groups) ({})"
-					.format(n_outputs, sum(signal_groups)))
+			signal_groups = [1]
+		signal_groups = list(signal_groups)
+		if any((not isinstance(g, int)) or g < 1 for g in signal_groups):
+			raise ValueError(
+				"signal_groups must be a list of positive ints; got {!r}"
+				.format(signal_groups))
 
 		self.signal_groups = signal_groups
 		self.n_outputs = sum(signal_groups)
@@ -326,36 +304,12 @@ class Cherimoya(torch.nn.Module):
 		"""
 
 		payload = torch.load(path, map_location=device, weights_only=True)
-		config = dict(payload['config'])
-
-		# Back-compat: legacy checkpoints stored ``n_outputs`` and
-		# ``single_count_output`` in place of ``signal_groups``. The
-		# count head is now always per-group, so the only legacy combo
-		# that has no faithful re-interpretation is
-		# ``single_count_output=True`` with ``n_outputs > 1`` — that
-		# checkpoint's count head collapsed every channel into a single
-		# shared scalar, a mode this version no longer supports. Any
-		# other legacy combination maps cleanly to N unstranded groups.
-		legacy_single_count = config.pop('single_count_output', None)
-		if 'signal_groups' not in config and 'n_outputs' in config:
-			n_out = int(config.pop('n_outputs'))
-			if legacy_single_count is True and n_out > 1:
-				raise ValueError(
-					"This checkpoint was saved with single_count_output=True "
-					"and n_outputs={n_out}, whose count head collapsed every "
-					"output channel into a single shared scalar. That mode "
-					"has been removed (the count head is now always per "
-					"group), so the saved weights cannot be loaded without "
-					"changing semantics. Retrain with the new signal_groups "
-					"API to use this model.".format(n_out=n_out)
-				)
-			config['signal_groups'] = [1] * n_out
-
-		# Old checkpoints (saved before the compile kwargs existed) won't have
-		# `compile` or `compile_mode` in their config, so the defaults apply.
-		# Newer checkpoints also won't, because `_init_kwargs` intentionally
-		# excludes both.
-		model = cls(**config, compile=compile, compile_mode=compile_mode)
+		# The compile / compile_mode kwargs are runtime knobs that
+		# `_init_kwargs` intentionally excludes from the saved config,
+		# so they're always supplied here rather than read from the
+		# checkpoint.
+		model = cls(**payload['config'], compile=compile,
+			compile_mode=compile_mode)
 		model.load_state_dict(payload['state_dict'])
 		return model.to(device)
 
