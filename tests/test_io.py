@@ -393,6 +393,48 @@ def test_normalize_signal_groups_rejects_bad_types():
 		normalize_signal_groups([["a.bw", 5]])
 
 
+# --- Contract with the `cherimoya pipeline` command's bam2bw rewrite ----
+#
+# `cherimoya_cli/commands/pipeline.py` rewrites `signals` and `controls`
+# to two specific literal forms after `bam2bw` converts BAM/SAM/etc to
+# bigWigs. Both forms MUST resolve to a single group whose size matches
+# the strandedness:
+#
+#   unstranded=True  -> ``[name + ".bw"]``                    -> groups=[1]
+#   unstranded=False -> ``[[name + ".+.bw", name + ".-.bw"]]`` -> groups=[2]
+#
+# If either side of this contract changes (the pipeline drops the inner
+# list wrapper, or `normalize_signal_groups` re-interprets a singleton
+# list of strings), BAM-input pipeline runs would silently regress to
+# the original RC scrambling bug. These tests pin both forms in place.
+
+def test_pipeline_bam2bw_unstranded_form_is_one_unstranded_group():
+	flat, groups = normalize_signal_groups(["my_experiment.bw"])
+	assert flat == ["my_experiment.bw"]
+	assert groups == [1]
+
+
+def test_pipeline_bam2bw_stranded_form_is_one_stranded_pair():
+	flat, groups = normalize_signal_groups(
+		[["my_experiment.+.bw", "my_experiment.-.bw"]])
+	assert flat == ["my_experiment.+.bw", "my_experiment.-.bw"]
+	assert groups == [2]
+
+
+def test_pipeline_bam2bw_control_unstranded_form_is_one_unstranded_group():
+	flat, groups = normalize_signal_groups(["my_experiment.control.bw"])
+	assert flat == ["my_experiment.control.bw"]
+	assert groups == [1]
+
+
+def test_pipeline_bam2bw_control_stranded_form_is_one_stranded_pair():
+	flat, groups = normalize_signal_groups(
+		[["my_experiment.control.+.bw", "my_experiment.control.-.bw"]])
+	assert flat == [
+		"my_experiment.control.+.bw", "my_experiment.control.-.bw"]
+	assert groups == [2]
+
+
 @pytest.mark.parametrize("groups,expected_perm", [
 	([1], [0]),
 	([1, 1, 1], [0, 1, 2]),                # all unstranded -> identity
