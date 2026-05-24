@@ -20,6 +20,7 @@ def run(args):
 	from tangermeme.predict import predict
 
 	from cherimoya import Cherimoya
+	from cherimoya.io import normalize_signal_groups
 	from cherimoya.performance import calculate_performance_measures
 	from ..defaults import default_evaluate_parameters
 	from ..utils import merge_parameters
@@ -27,6 +28,15 @@ def run(args):
 	parameters = merge_parameters(args.parameters, default_evaluate_parameters)
 	if parameters['skip']:
 		sys.exit()
+
+	# Flatten any structured (list-of-lists) signals/controls so they
+	# can be handed to extract_loci. The model's own signal_groups
+	# (recovered below from the loaded checkpoint) drives count pooling
+	# under calculate_performance_measures.
+	signal_files, signal_groups = normalize_signal_groups(parameters['signals'])
+	control_files, _ = normalize_signal_groups(parameters['controls'])
+	parameters['signals'] = signal_files
+	parameters['controls'] = control_files
 
 	measure_names = ['profile_mnll', 'profile_jsd', 'profile_pearson',
 		'profile_spearman', 'count_pearson', 'count_spearman', 'count_mse']
@@ -74,8 +84,15 @@ def run(args):
 		y_hat_logits = (y_hat_logits + y_hat_logits_rc) / 2
 		y_hat_logcounts = (y_hat_logcounts + y_hat_logcounts_rc) / 2
 
+	# Prefer the model's own grouping over whatever the caller passed
+	# in the JSON — the checkpoint is authoritative about how its count
+	# head is laid out.
+	model_signal_groups = getattr(model, 'signal_groups', None)
+	if model_signal_groups is None:
+		model_signal_groups = signal_groups
+
 	measures = calculate_performance_measures(y_hat_logits, y,
-		y_hat_logcounts)
+		y_hat_logcounts, signal_groups=model_signal_groups)
 
 	with open(parameters['performance_filename'], "w") as outfile:
 		outfile.write("\t".join(measure_names))

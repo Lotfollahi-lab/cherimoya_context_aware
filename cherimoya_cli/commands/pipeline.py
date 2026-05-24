@@ -17,6 +17,10 @@ def _validate_inputs(parameters):
 	(http://, https://, gs://, s3://) are skipped because resolving them
 	requires network access. Raises FileNotFoundError listing every
 	missing path so users see all problems at once.
+
+	The recursive ``_check`` walks lists, so it correctly handles the
+	grouped ``signals``/``controls`` form (``list`` of ``str`` or
+	``list`` of ``list[str]``).
 	"""
 
 	import os
@@ -60,6 +64,8 @@ def run(args):
 
 	import pandas
 
+	from cherimoya.io import normalize_signal_groups
+
 	from . import attribute as attribute_cmd
 	from . import fit as fit_cmd
 	from . import marginalize as marginalize_cmd
@@ -85,6 +91,14 @@ def run(args):
 
 	pname = parameters['name']
 
+	# Flatten any grouped signals/controls early — every preprocessing
+	# step (MACS3 callpeak, bam2bw, file-extension sniffing) operates on
+	# the underlying files regardless of how they're grouped for the
+	# model. The downstream fit step receives the *original* grouped
+	# form via the pipeline JSON, so grouping is preserved end-to-end.
+	signal_files, signal_groups = normalize_signal_groups(parameters['signals'])
+	control_files, control_groups = normalize_signal_groups(parameters['controls'])
+
 	def _run_step(cmd_fn, json_path):
 		"""Invoke a CLI step in-process by calling its run(args) directly."""
 		if not parameters['dry_run']:
@@ -102,7 +116,7 @@ def run(args):
 			if preprocess_parameters['fragments']:
 				file_format = 'FRAG'
 			else:
-				fname = parameters['signals'][0]
+				fname = signal_files[0]
 
 				if fname.endswith('.gz'):
 					file_format = fname.split(".")[-2].upper()
@@ -124,11 +138,11 @@ def run(args):
 			"-t"
 		]
 
-		cmd_args.extend(parameters['signals'])
+		cmd_args.extend(signal_files)
 
-		if parameters['controls'] is not None:
+		if control_files is not None:
 			cmd_args += ['-c']
-			cmd_args.extend(parameters['controls'])
+			cmd_args.extend(control_files)
 
 		if preprocess_parameters['fragments']:
 			cmd_args += ['--max-count', '1']
@@ -145,7 +159,7 @@ def run(args):
 
 	ftypes = '.sam', '.bam', '.bed', '.bed.gz', '.tsv', '.tsv.gz'
 
-	if parameters['signals'][0].endswith(ftypes):
+	if signal_files[0].endswith(ftypes):
 		if preprocess_parameters['verbose']:
 			print("Step 0.2: Convert data to bigWigs")
 
@@ -171,18 +185,23 @@ def run(args):
 		if preprocess_parameters["verbose"]:
 			cmd_args += ["-v"]
 
-		cmd_args += parameters['signals']
+		cmd_args += signal_files
 		if not parameters['dry_run']:
 			subprocess.run(cmd_args, check=True)
 
+		# After conversion, rewrite `signals` in the grouped form so the
+		# downstream fit JSON declares strandedness correctly. Unstranded
+		# bam2bw produces one bigWig — one unstranded group. Stranded
+		# bam2bw produces a (+, -) pair which must be wrapped in an
+		# inner list to land as a single stranded group.
 		if preprocess_parameters["unstranded"]:
 			parameters['signals'] = [pname + ".bw"]
 		else:
-			parameters['signals'] = [pname + ".+.bw", pname + ".-.bw"]
+			parameters['signals'] = [[pname + ".+.bw", pname + ".-.bw"]]
 
 
-	if parameters['controls'] is not None:
-		if parameters['controls'][0].endswith(ftypes):
+	if control_files is not None:
+		if control_files[0].endswith(ftypes):
 			cmd_args = [
 				"bam2bw",
 				"-s", parameters['sequences'],
@@ -204,14 +223,15 @@ def run(args):
 			if preprocess_parameters["verbose"]:
 				cmd_args += ["-v"]
 
-			cmd_args += parameters['controls']
+			cmd_args += control_files
 			if not parameters['dry_run']:
 				subprocess.run(cmd_args, check=True)
 
 			if preprocess_parameters["unstranded"]:
 				parameters['controls'] = [pname + ".control.bw"]
 			else:
-				parameters['controls'] = [pname + ".control.+.bw", pname + ".control.-.bw"]
+				parameters['controls'] = [
+					[pname + ".control.+.bw", pname + ".control.-.bw"]]
 
 
 	###

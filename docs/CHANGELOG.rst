@@ -1,6 +1,64 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Data pipeline (**breaking**)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Fixed a reverse-complement bug in
+  :class:`cherimoya.io.PeakNegativeSampler` that scrambled tracks when
+  training on a mix of unstranded and stranded signals (e.g.
+  co-training ATAC with a stranded TF). Previously,
+  ``torch.flip(yi, [0, 1])`` flipped both the channel dimension and the
+  length dimension, which was only correct when *every* track was
+  unstranded (no-op channel flip) or *every* track was part of one
+  stranded pair (clean +/- swap). With a mix of three or more tracks
+  the channel flip cross-wired the modalities. The sampler now applies
+  a per-group channel permutation (precomputed once from the group
+  structure) plus a length-only flip, so each group's internal
+  channels are swapped independently and groups never bleed into one
+  another.
+* The ``signals`` and ``controls`` API now accepts a **grouped** form
+  in addition to a flat list. Each entry of the outer list is one
+  group — either a ``str`` (one-channel unstranded group) or a
+  ``list[str]`` (multi-channel group, e.g. a stranded ``(+, -)``
+  pair). Example::
+
+      signals = ["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"]]
+
+  *Breaking semantic change:* a flat list of N files is now
+  interpreted as N independent **unstranded** groups, not as a single
+  N-channel block. BPNet-style callers that previously passed
+  ``["plus.bw", "minus.bw"]`` as a stranded pair must update to the
+  nested form ``[["plus.bw", "minus.bw"]]``.
+* Added :func:`cherimoya.io.normalize_signal_groups` and
+  :func:`cherimoya.io.channel_permutation_from_groups` as the public
+  helpers callers can use to convert between the grouped form and the
+  flat (file-list, group-sizes) form, and to derive the per-group RC
+  permutation.
+
+Model
+~~~~~
+
+* The ``Cherimoya`` constructor now takes ``signal_groups`` (list of
+  per-group channel counts) in place of the now-deprecated
+  ``n_outputs``. ``signal_groups`` controls both the profile head
+  width (``sum(signal_groups)``) and the count head width
+  (``len(signal_groups)`` when ``single_count_output=False``, or 1
+  otherwise). So a stranded ``(+, -)`` pair emits two profile
+  channels but a single count prediction — the per-strand counts are
+  always tied. Old checkpoints that stored ``n_outputs`` continue to
+  load: the loader maps ``n_outputs=N`` to ``signal_groups=[1]*N``,
+  matching the new "all-unstranded" semantics of a flat signals list.
+* :func:`cherimoya.losses._mixture_loss` and
+  :func:`cherimoya.performance.calculate_performance_measures` both
+  accept an optional ``signal_groups`` argument. When supplied, the
+  true counts are pooled per group before the count loss / count
+  Pearson are computed, so a stranded pair contributes a single
+  per-group target instead of one per strand.
+
 v0.1.0
 ------
 

@@ -154,10 +154,18 @@ JSON schema (top-level keys, with defaults from
      - BED of negatives. If null, GC-matched negatives are sampled.
    * - ``signals``
      - ``null``
-     - List of signal files (BAM or bigWig). Required.
+     - Signal-track specification (BAM or bigWig files). Required.
+       Accepts either a flat list — in which case each entry is its
+       own one-channel (unstranded) group — or a structured list whose
+       entries are each a ``str`` (one-channel group) or a
+       ``list[str]`` (multi-channel group, e.g. a stranded
+       ``(+, -)`` pair). Example: ``["atac.bw",
+       ["ctcf.+.bw", "ctcf.-.bw"]]`` declares one unstranded ATAC group
+       and one stranded CTCF group. See the note in
+       ``cherimoya_cli/defaults.py`` for full semantics.
    * - ``controls``
      - ``null``
-     - Optional list of control files.
+     - Optional list of control files. Same grouping rule as ``signals``.
    * - ``skip``
      - ``false``
      - If ``true``, the whole pipeline is a no-op.

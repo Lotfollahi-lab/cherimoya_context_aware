@@ -4,7 +4,8 @@ import numpy
 import pytest
 import torch
 
-from cherimoya.io import PeakNegativeSampler
+from cherimoya.io import (PeakNegativeSampler, normalize_signal_groups,
+	channel_permutation_from_groups)
 
 
 def _make_sampler(n_peaks=8, n_negs=8, in_window=20, out_window=10,
@@ -346,3 +347,271 @@ def test_reverse_complement_flips_when_enabled():
 			flipped += 1
 	assert peak_draws == 200
 	assert 0.4 * peak_draws < flipped < 0.6 * peak_draws
+
+
+# --------- normalize_signal_groups / channel_permutation_from_groups -------
+
+def test_normalize_signal_groups_none():
+	flat, groups = normalize_signal_groups(None)
+	assert flat is None
+	assert groups == []
+
+
+def test_normalize_signal_groups_flat_list_is_all_unstranded():
+	"""Breaking-change semantics: a flat list of N files is N independent
+	unstranded groups (NOT a single stranded pair)."""
+
+	flat, groups = normalize_signal_groups(["a.bw", "b.bw", "c.bw"])
+	assert flat == ["a.bw", "b.bw", "c.bw"]
+	assert groups == [1, 1, 1]
+
+
+def test_normalize_signal_groups_nested_pair():
+	flat, groups = normalize_signal_groups([["plus.bw", "minus.bw"]])
+	assert flat == ["plus.bw", "minus.bw"]
+	assert groups == [2]
+
+
+def test_normalize_signal_groups_mixed():
+	flat, groups = normalize_signal_groups(
+		["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"], "h3k27ac.bw"])
+	assert flat == ["atac.bw", "ctcf.+.bw", "ctcf.-.bw", "h3k27ac.bw"]
+	assert groups == [1, 2, 1]
+
+
+def test_normalize_signal_groups_rejects_empty_group():
+	with pytest.raises(ValueError, match="empty"):
+		normalize_signal_groups([["a.bw"], []])
+
+
+def test_normalize_signal_groups_rejects_bad_types():
+	with pytest.raises(TypeError):
+		normalize_signal_groups("not-a-list")
+	with pytest.raises(TypeError):
+		normalize_signal_groups([1, 2, 3])
+	with pytest.raises(TypeError):
+		normalize_signal_groups([["a.bw", 5]])
+
+
+@pytest.mark.parametrize("groups,expected_perm", [
+	([1], [0]),
+	([1, 1, 1], [0, 1, 2]),                # all unstranded -> identity
+	([2], [1, 0]),                          # single stranded pair -> swap
+	([1, 2], [0, 2, 1]),                    # unstranded + stranded
+	([2, 1], [1, 0, 2]),                    # stranded + unstranded
+	([1, 2, 1, 2], [0, 2, 1, 3, 5, 4]),     # multiple groups, mixed
+])
+def test_channel_permutation_from_groups(groups, expected_perm):
+	perm = channel_permutation_from_groups(groups)
+	assert perm.tolist() == expected_perm
+
+
+# --------- PeakNegativeSampler with signal_perm ----------------------------
+
+def _make_multichannel_sampler(group_sizes, control_group_sizes=None,
+		n_peaks=4, in_window=8, out_window=4, max_jitter=0,
+		random_state=0):
+	"""Build a sampler whose signals have unique per-channel markers so
+	we can verify that the post-RC tensor matches the expected permuted
+	form exactly. Channel c of every peak is filled with the constant
+	value ``c + 1``; the length dim is filled with the same constant so
+	the length flip is also observable.
+	"""
+	n_signal_ch = sum(group_sizes)
+
+	in_len = in_window + 2 * max_jitter
+	out_len = out_window + 2 * max_jitter
+
+	peak_seqs = torch.zeros(n_peaks, 4, in_len)
+	for i in range(n_peaks):
+		peak_seqs[i, 0, :] = float(i + 1)
+	neg_seqs = torch.zeros(1, 4, in_len)
+
+	# Signal: channel c has value (c+1) everywhere. Length positions are
+	# numbered 0..out_len-1 in channel-relative units so we can also see
+	# the length flip.
+	peak_signals = torch.zeros(n_peaks, n_signal_ch, out_len)
+	for c in range(n_signal_ch):
+		for p in range(out_len):
+			peak_signals[:, c, p] = (c + 1) * 100 + p
+	neg_signals = torch.zeros(1, n_signal_ch, out_len)
+
+	peak_controls = None
+	neg_controls = None
+	control_perm = None
+	if control_group_sizes is not None:
+		n_ctl_ch = sum(control_group_sizes)
+		peak_controls = torch.zeros(n_peaks, n_ctl_ch, in_len)
+		for c in range(n_ctl_ch):
+			for p in range(in_len):
+				peak_controls[:, c, p] = (c + 1) * 1000 + p
+		neg_controls = torch.zeros(1, n_ctl_ch, in_len)
+		control_perm = channel_permutation_from_groups(control_group_sizes)
+
+	signal_perm = channel_permutation_from_groups(group_sizes)
+
+	sampler = PeakNegativeSampler(
+		peak_sequences=peak_seqs,
+		peak_signals=peak_signals,
+		negative_sequences=neg_seqs,
+		negative_signals=neg_signals,
+		peak_controls=peak_controls,
+		negative_controls=neg_controls,
+		in_window=in_window,
+		out_window=out_window,
+		max_jitter=max_jitter,
+		reverse_complement=True,
+		negative_ratio=0,
+		random_state=random_state,
+		signal_perm=signal_perm,
+		control_perm=control_perm,
+	)
+	return sampler, peak_signals, peak_controls
+
+
+def _rc_idx(sampler, n_peaks):
+	"""Return one peak idx that was RC'd and one that was not, for the
+	first epoch's rc-flag pattern."""
+
+	rc, non_rc = None, None
+	for i in range(n_peaks):
+		if sampler._rc_flags[i] and rc is None:
+			rc = i
+		elif not sampler._rc_flags[i] and non_rc is None:
+			non_rc = i
+		if rc is not None and non_rc is not None:
+			break
+	return rc, non_rc
+
+
+def test_signal_perm_validates_channel_count():
+	"""signal_perm must agree with peak_signals.shape[1]."""
+
+	sampler_kwargs = dict(
+		peak_sequences=torch.zeros(2, 4, 8),
+		peak_signals=torch.zeros(2, 3, 4),
+		negative_sequences=torch.zeros(1, 4, 8),
+		negative_signals=torch.zeros(1, 3, 4),
+		in_window=8, out_window=4, max_jitter=0,
+		negative_ratio=0, random_state=0,
+	)
+	with pytest.raises(ValueError, match="signal_perm length"):
+		PeakNegativeSampler(signal_perm=torch.arange(2), **sampler_kwargs)
+	# Matching length is accepted.
+	PeakNegativeSampler(signal_perm=torch.arange(3), **sampler_kwargs)
+
+
+def test_unstranded_group_does_not_swap_under_rc():
+	"""A 1-channel (unstranded) group must keep its channel in place
+	under RC — only the length dim flips."""
+
+	# Single unstranded track: perm = [0]; RC leaves channel identity.
+	sampler, peak_signals, _ = _make_multichannel_sampler(
+		group_sizes=[1], n_peaks=16)
+
+	rc_idx, non_rc_idx = _rc_idx(sampler, 16)
+	assert rc_idx is not None and non_rc_idx is not None
+
+	# Non-RC sample: matches the source slice exactly.
+	X, y, _ = sampler[non_rc_idx]
+	assert torch.equal(y, peak_signals[sampler._source_idx[non_rc_idx]])
+
+	# RC sample: channel 0 stays at index 0; length is reversed.
+	X, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	expected = peak_signals[src].flip(-1)
+	assert torch.equal(y, expected)
+
+
+def test_stranded_pair_swaps_under_rc():
+	"""A 2-channel (+, -) group must swap channels AND flip length under
+	RC. This is the legacy single-pair BPNet behavior — keep it."""
+
+	sampler, peak_signals, _ = _make_multichannel_sampler(
+		group_sizes=[2], n_peaks=16)
+
+	rc_idx, _ = _rc_idx(sampler, 16)
+	assert rc_idx is not None
+
+	X, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	# Expected: channels swapped, then length reversed.
+	expected = peak_signals[src][[1, 0]].flip(-1)
+	assert torch.equal(y, expected)
+
+
+def test_mixed_unstranded_and_stranded_under_rc():
+	"""The headline bug fix: with signals = [unstranded, +, -], RC must
+	leave the unstranded channel at index 0 and only swap the +/- pair
+	at indices 1, 2 — NOT scramble all three."""
+
+	sampler, peak_signals, _ = _make_multichannel_sampler(
+		group_sizes=[1, 2], n_peaks=16)
+
+	rc_idx, non_rc_idx = _rc_idx(sampler, 16)
+
+	# Non-RC: identity (no permutation, no length flip).
+	X, y, _ = sampler[non_rc_idx]
+	src = sampler._source_idx[non_rc_idx]
+	assert torch.equal(y, peak_signals[src])
+
+	# RC: permutation [0, 2, 1] (unstranded stays put; pair swaps),
+	# then length reversed.
+	X, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	expected = peak_signals[src][[0, 2, 1]].flip(-1)
+	assert torch.equal(y, expected)
+
+	# Critically: under RC, the unstranded channel's per-bp values must
+	# come from the SOURCE unstranded channel (not the TF-minus
+	# channel). That's the exact regression the old `flip(yi, [0, 1])`
+	# caused. Verify the marker value lives in channel 0 either way.
+	# Channel 0 markers are 100..100+out_len-1 (forward) or reversed.
+	assert y[0, 0].item() >= 100 and y[0, 0].item() < 200
+
+
+def test_three_groups_independent_under_rc():
+	"""Three independent groups [1, 2, 1] under RC: groups don't bleed
+	into one another, and each group's internal channels swap correctly."""
+
+	sampler, peak_signals, _ = _make_multichannel_sampler(
+		group_sizes=[1, 2, 1], n_peaks=24)
+
+	rc_idx, _ = _rc_idx(sampler, 24)
+	X, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	expected = peak_signals[src][[0, 2, 1, 3]].flip(-1)
+	assert torch.equal(y, expected)
+
+
+def test_control_perm_follows_same_rule_under_rc():
+	"""Controls use control_perm symmetrically: a stranded control pair
+	swaps its two channels under RC, just like signals."""
+
+	sampler, _, peak_controls = _make_multichannel_sampler(
+		group_sizes=[1], control_group_sizes=[2], n_peaks=16)
+
+	rc_idx, _ = _rc_idx(sampler, 16)
+	X, X_ctl, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	expected_ctl = peak_controls[src][[1, 0]].flip(-1)
+	assert torch.equal(X_ctl, expected_ctl)
+
+
+def test_no_perm_falls_back_to_length_only_flip():
+	"""When signal_perm=None and reverse_complement=True the channel dim
+	stays in place — only length is flipped. (This is what a caller
+	that opts out of grouping gets, and is what a single-channel
+	sampler effectively does.)"""
+
+	sampler, peak_signals, _ = _make_multichannel_sampler(
+		group_sizes=[3], n_peaks=16)
+	# Override: pretend the caller did not pass a perm.
+	sampler.signal_perm = None
+
+	rc_idx, _ = _rc_idx(sampler, 16)
+	X, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+	# Channels in their original order, length reversed.
+	expected = peak_signals[src].flip(-1)
+	assert torch.equal(y, expected)

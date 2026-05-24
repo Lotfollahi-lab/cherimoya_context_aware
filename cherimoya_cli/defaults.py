@@ -1,5 +1,28 @@
 # cherimoya_cli defaults
 # Author: Jacob Schreiber <jmschreiber91@gmail.com>
+#
+# A note on `signals` / `controls`:
+#
+# These accept either a flat list of file paths or a structured list
+# whose entries are each ``str`` (a one-channel unstranded group) or
+# ``list[str]`` (a multi-channel group such as a stranded ``(+, -)``
+# pair). The grouping decides how reverse-complement augmentation
+# permutes channels and how many predictions the count head emits.
+# Examples::
+#
+#     "signals": ["atac.bw"]
+#         # one unstranded group, one count prediction
+#
+#     "signals": [["ctcf.+.bw", "ctcf.-.bw"]]
+#         # one stranded group, one count prediction shared across +/-
+#
+#     "signals": ["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"]]
+#         # one unstranded group + one stranded group; two count predictions
+#
+# A flat list of N files is now interpreted as N independent unstranded
+# groups. BPNet-style callers that previously passed ``["plus.bw",
+# "minus.bw"]`` as a stranded pair must update to the nested form
+# ``[["plus.bw", "minus.bw"]]`` to keep the +/- swap on RC.
 
 training_chroms = ["chr2", "chr4", "chr5", "chr7", "chr9", "chr10", "chr11",
     "chr12", "chr13", "chr14", "chr15", "chr16", "chr17", "chr18", "chr19",

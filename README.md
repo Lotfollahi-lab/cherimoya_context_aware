@@ -106,7 +106,7 @@ For programmatic use, the three public symbols are `Cherimoya` (the model), `Che
 ```python
 from cherimoya import Cherimoya
 
-model = Cherimoya(n_filters=96, n_layers=9, n_outputs=1).cuda()
+model = Cherimoya(n_filters=96, n_layers=9, signal_groups=[1]).cuda()
 y_profile, y_counts = model(X)              # X: (N, 4, L) one-hot DNA
 ```
 

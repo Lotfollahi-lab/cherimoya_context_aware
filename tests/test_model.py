@@ -86,6 +86,89 @@ def test_n_outputs_and_control_tracks_shape():
 	assert model.fconv.in_channels == 8 + 2  # n_filters + n_control_tracks
 
 
+# --------- signal_groups construction --------------------------------------
+
+def test_signal_groups_default_is_single_unstranded():
+	model = Cherimoya(n_filters=8, n_layers=2, verbose=False)
+	assert model.signal_groups == [1]
+	assert model.n_outputs == 1
+	assert model.n_groups == 1
+	assert model.lw0.shape == (1,)
+	assert model.lw1.shape == (1,)
+
+
+def test_signal_groups_legacy_n_outputs_maps_to_all_unstranded():
+	"""Pre-grouping callers passed only n_outputs. That must now be
+	interpreted as N independent unstranded groups (matching the new
+	flat-list convention in the data pipeline)."""
+
+	model = Cherimoya(n_filters=8, n_layers=2, n_outputs=3, verbose=False)
+	assert model.signal_groups == [1, 1, 1]
+	assert model.n_outputs == 3
+	assert model.n_groups == 3
+
+
+def test_signal_groups_grouped_pair():
+	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 2],
+		single_count_output=False, verbose=False)
+	assert model.signal_groups == [1, 2]
+	assert model.n_outputs == 3   # 1 + 2 channels total
+	assert model.n_groups == 2    # 2 groups
+	assert model.fconv.out_channels == 3
+	# Per-group count head when single_count_output=False.
+	assert model.linear.out_features == 2
+	assert model.lw0.shape == (3,)
+	assert model.lw1.shape == (2,)
+
+
+def test_signal_groups_grouped_pair_with_shared_count_head():
+	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 2],
+		single_count_output=True, verbose=False)
+	# Shared count head: still one output regardless of grouping.
+	assert model.linear.out_features == 1
+	assert model.lw1.shape == (1,)
+
+
+def test_signal_groups_mismatch_with_n_outputs_raises():
+	with pytest.raises(ValueError, match="disagrees with sum"):
+		Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 2],
+			n_outputs=4, verbose=False)
+
+
+def test_signal_groups_round_trips_through_save_load(tmp_path):
+	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 2],
+		single_count_output=False, verbose=False)
+	path = tmp_path / "m.torch"
+	model.save(str(path))
+	loaded = Cherimoya.load(str(path), compile=False)
+	assert loaded.signal_groups == [1, 2]
+	assert loaded.n_outputs == 3
+	assert loaded.n_groups == 2
+
+
+def test_load_legacy_checkpoint_with_only_n_outputs(tmp_path):
+	"""A checkpoint saved with the pre-grouping format (config has
+	n_outputs but no signal_groups) must load and be reinterpreted as
+	all-unstranded groups."""
+
+	# Hand-craft a legacy-style checkpoint without signal_groups.
+	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 1, 1],
+		single_count_output=False, verbose=False)
+	state = model.state_dict()
+	legacy_config = {
+		'n_filters': 8, 'n_layers': 2, 'n_outputs': 3,
+		'n_control_tracks': 0, 'expansion': 2, 'residual_scale': 0.15,
+		'name': 'cherimoya.8.2', 'trimming': model.trimming,
+		'single_count_output': False, 'verbose': False,
+	}
+	path = tmp_path / "legacy.torch"
+	torch.save({'config': legacy_config, 'state_dict': state}, str(path))
+
+	loaded = Cherimoya.load(str(path), compile=False)
+	assert loaded.signal_groups == [1, 1, 1]
+	assert loaded.n_outputs == 3
+
+
 @pytest.mark.parametrize("n_outputs,single_count_output,expected_lw1", [
 	(1, True,  (1,)),   # single-task: back-compat with pre-vector checkpoints
 	(1, False, (1,)),   # single-task, per-track count head: same shape

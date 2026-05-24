@@ -87,3 +87,68 @@ def test_mixture_loss_is_differentiable():
 	assert logcounts.grad is not None
 	assert torch.isfinite(logits.grad).all()
 	assert torch.isfinite(logcounts.grad).all()
+
+
+# --------- Per-group count pooling ----------------------------------------
+
+def test_mixture_loss_signal_groups_pool_counts_per_group():
+	"""When signal_groups=[1, 2] is given, the count target for the
+	stranded pair is the SUM of the two strands' counts — not two
+	separate counts. profile_loss is still per-channel."""
+
+	# 3 channels: 1 unstranded + 1 stranded pair = 2 groups.
+	y, logits, _ = _toy_inputs(n_outputs=3)
+	# Per-group log counts: shape (n, 2).
+	logcounts_grouped = torch.randn(y.shape[0], 2,
+		generator=torch.Generator().manual_seed(1))
+
+	profile_loss, count_loss = _mixture_loss(y, logits, logcounts_grouped,
+		signal_groups=[1, 2])
+	assert profile_loss.shape == (3,)  # still per channel
+	assert count_loss.shape == (2,)    # one per group
+
+	# Sanity: per-group MSE matches what we get if we hand-pool y.
+	y_per_track = y.sum(dim=-1)
+	y_per_group = torch.stack([
+		y_per_track[:, 0],
+		y_per_track[:, 1] + y_per_track[:, 2],
+	], dim=-1)
+	expected = ((torch.log(y_per_group + 1) - logcounts_grouped) ** 2).mean(dim=0)
+	assert torch.allclose(count_loss, expected, atol=1e-5)
+
+
+def test_mixture_loss_signal_groups_all_size_one_matches_legacy():
+	"""signal_groups=[1, 1, 1] should produce the same count loss as
+	the legacy per-channel path (signal_groups=None)."""
+
+	y, logits, logcounts = _toy_inputs(n_outputs=3, n_count_outputs=3)
+	_, count_legacy = _mixture_loss(y, logits, logcounts)
+	_, count_grouped = _mixture_loss(y, logits, logcounts,
+		signal_groups=[1, 1, 1])
+	assert torch.allclose(count_legacy, count_grouped, atol=1e-6)
+
+
+def test_mixture_loss_signal_groups_with_shared_count_head():
+	"""When the count head is shared (n_count_outputs=1) and groups are
+	given, the count target collapses across all groups (and therefore
+	all channels) into a single total."""
+
+	y, logits, _ = _toy_inputs(n_outputs=3)
+	logcounts = torch.randn(y.shape[0], 1,
+		generator=torch.Generator().manual_seed(2))
+
+	_, count_loss = _mixture_loss(y, logits, logcounts,
+		signal_groups=[1, 2])
+	assert count_loss.shape == (1,)
+
+	# Should equal the legacy shared-head result (sum across channels).
+	expected_total = y.sum(dim=(-1, -2)).unsqueeze(-1)  # (n, 1)
+	expected = ((torch.log(expected_total + 1) - logcounts) ** 2).mean(dim=0)
+	assert torch.allclose(count_loss, expected, atol=1e-5)
+
+
+def test_mixture_loss_signal_groups_size_mismatch_raises():
+	y, logits, logcounts = _toy_inputs(n_outputs=3, n_count_outputs=2)
+	# sum(signal_groups) must equal y.shape[1] (=3).
+	with pytest.raises(ValueError, match="sum.signal_groups"):
+		_mixture_loss(y, logits, logcounts, signal_groups=[1, 1])

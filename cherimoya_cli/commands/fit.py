@@ -26,7 +26,7 @@ def run(args):
 	from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 	from cherimoya import Cherimoya
-	from cherimoya.io import PeakGenerator
+	from cherimoya.io import PeakGenerator, normalize_signal_groups
 
 	from tangermeme.io import extract_loci
 
@@ -37,6 +37,15 @@ def run(args):
 	parameters = merge_parameters(args.parameters, default_fit_parameters)
 	if parameters['skip']:
 		sys.exit()
+
+	# Resolve grouped/flat signal specs into a flat list of files plus
+	# the per-group sizes. The flat list is what extract_loci and
+	# downstream tooling need; the group sizes determine the channel
+	# permutation used under RC and the number of count predictions.
+	signal_files, signal_groups = normalize_signal_groups(parameters['signals'])
+	control_files, control_groups = normalize_signal_groups(parameters['controls'])
+	parameters['signals'] = signal_files
+	parameters['controls'] = control_files
 
 	if parameters['verbose']:
 		print("Training Chroms: ", parameters['training_chroms'])
@@ -70,7 +79,9 @@ def run(args):
 		random_state=parameters['random_state'],
 		batch_size=parameters['batch_size'],
 		num_workers=parameters['num_workers'],
-		verbose=parameters['verbose']
+		verbose=parameters['verbose'],
+		signal_groups=signal_groups,
+		control_groups=control_groups,
 	)
 
 	valid_data = extract_loci(
@@ -112,7 +123,7 @@ def run(args):
 	model = Cherimoya(
 		n_filters=parameters['n_filters'],
 		n_layers=parameters['n_layers'],
-		n_outputs=len(parameters['signals']),
+		signal_groups=signal_groups,
 		n_control_tracks=n_control_tracks,
 		expansion=parameters['expansion'],
 		residual_scale=parameters['residual_scale'],

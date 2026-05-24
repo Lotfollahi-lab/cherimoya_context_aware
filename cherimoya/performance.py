@@ -306,8 +306,8 @@ def mean_squared_error(arr1, arr2):
 
 
 def calculate_performance_measures(logps, true_counts, pred_log_counts,
-	labels=None, kernel_sigma=7, kernel_width=81, smooth_true=False, 
-	smooth_predictions=False, measures=None):
+	labels=None, kernel_sigma=7, kernel_width=81, smooth_true=False,
+	smooth_predictions=False, measures=None, signal_groups=None):
 	"""Calculates a set of performance measures given true and observed data.
 
 	This function will take in observed readouts, predicted profiles, and
@@ -374,6 +374,14 @@ def calculate_performance_measures(logps, true_counts, pred_log_counts,
 	measures: None or list, optional
 		If a list of strings, each string should correspond to a performance measure
 		to calculate. If None, calculate all performance measures.
+
+	signal_groups: list of int or None, optional
+		Group sizes for the channel dimension of ``true_counts``. When
+		given, count metrics pool the true counts per group so a
+		``(+, -)`` pair contributes a single per-group target — matching
+		the per-group count head. When None and there is more than one
+		predicted count, behavior falls back to the legacy "all
+		channels summed into one total" target. Default is None.
 
 
 	Returns
@@ -442,20 +450,50 @@ def calculate_performance_measures(logps, true_counts, pred_log_counts,
 			kernel_width=kernel_width)
 
 
-	# Count Performance Measures
-	true_counts = true_counts.sum(dim=(-1, -2)).unsqueeze(-1)
-	true_log_counts = torch.log(true_counts + 1)
+	# Count Performance Measures.
+	#
+	# Build the per-example true count target. There are three modes:
+	#  - signal_groups given AND pred has one count per group: pool true
+	#    counts within each group, so a stranded (+, -) pair contributes
+	#    one per-group target that lines up with the per-group head.
+	#  - pred has one count (shared head): collapse the channel dim too,
+	#    yielding a single per-example total target.
+	#  - signal_groups is None and there are multiple predicted counts:
+	#    legacy fall-through — every predicted count is compared against
+	#    the same per-example total.
+	n_pred = pred_log_counts.shape[-1]
+	per_channel = true_counts.sum(dim=-1)  # (n, n_outputs)
+
+	if signal_groups is not None and n_pred == len(signal_groups):
+		if sum(signal_groups) != per_channel.shape[-1]:
+			raise ValueError(
+				"sum(signal_groups)={} does not match true_counts channel "
+				"count ({})".format(sum(signal_groups),
+					per_channel.shape[-1]))
+		if len(signal_groups) == per_channel.shape[-1]:
+			per_target = per_channel  # all groups size 1
+		else:
+			group_idx = torch.repeat_interleave(
+				torch.arange(len(signal_groups), device=per_channel.device),
+				torch.tensor(signal_groups, device=per_channel.device))
+			per_target = torch.zeros(per_channel.shape[0], len(signal_groups),
+				device=per_channel.device, dtype=per_channel.dtype)
+			per_target.index_add_(1, group_idx, per_channel)
+	else:
+		per_target = per_channel.sum(dim=-1, keepdim=True)
+
+	true_log_counts = torch.log(per_target + 1)
 
 	if measures is None or 'count_pearson' in measures:
-		measures_['count_pearson'] = pearson_corr(pred_log_counts.T, 
+		measures_['count_pearson'] = pearson_corr(pred_log_counts.T,
 			true_log_counts.T)
 
 	if measures is None or 'count_spearman' in measures:
-		measures_['count_spearman'] = spearman_corr(pred_log_counts.T, 
+		measures_['count_spearman'] = spearman_corr(pred_log_counts.T,
 			true_log_counts.T)
 
 	if measures is None or 'count_mse' in measures:
-		measures_['count_mse'] = mean_squared_error(pred_log_counts.T, 
+		measures_['count_mse'] = mean_squared_error(pred_log_counts.T,
 			true_log_counts.T)
 
 	return measures_
