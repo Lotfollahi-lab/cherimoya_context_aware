@@ -196,11 +196,26 @@ class Cherimoya(torch.nn.Module):
 		torch.nn.init.zeros_(self.fconv.bias)
 		torch.nn.init.zeros_(self.linear.bias)
 
-		self.logger = Logger(["Epoch", "Iteration", "Training Time",
+		summary_columns = ["Epoch", "Iteration", "Training Time",
 			"Validation Time", "Training MNLL", "Training Count MSE",
 			"Validation MNLL", "Validation Profile Pearson",
-			"Validation Count Pearson", "Validation Count MSE", "Saved?"],
-			verbose=verbose)
+			"Validation Count Pearson", "Validation Count MSE", "Saved?"]
+		self.logger = Logger(summary_columns, verbose=verbose)
+
+		# Detail logger: same columns as the summary plus one
+		# ProfilePearson_g{i} and one CountPearson_g{i} per signal
+		# group, so multi-modal runs can be analyzed per-modality
+		# offline. Stays out of stdout — at hundreds of groups the
+		# detail rows would blow out the terminal — and lands at
+		# `{name}.detailed.log` on disk in parallel with the summary
+		# `{name}.log`.
+		per_group_columns = []
+		for i in range(self.n_groups):
+			per_group_columns.append("ProfilePearson_g{}".format(i))
+		for i in range(self.n_groups):
+			per_group_columns.append("CountPearson_g{}".format(i))
+		self.detail_logger = Logger(summary_columns + per_group_columns,
+			verbose=False)
 
 		# After load_state_dict completes (and the full recursion has
 		# updated every nested CheriBlock's Linear weights), refresh
@@ -465,6 +480,7 @@ class Cherimoya(torch.nn.Module):
 		early_stop_count = 0
 		best_corr = float("-inf")
 		self.logger.start()
+		self.detail_logger.start()
 
 		ema = EMA(self, decay=0.999)
 
@@ -543,10 +559,24 @@ class Cherimoya(torch.nn.Module):
 					signal_groups=self.signal_groups)
 
 				valid_profile_corr = numpy.nan_to_num(measures['profile_pearson'])
-				valid_count_corr = numpy.nan_to_num(measures['count_pearson']).mean()
+				valid_count_per_group = numpy.nan_to_num(measures['count_pearson'])
+				valid_count_corr = valid_count_per_group.mean()
 				valid_time = time.time() - tic
 
-				self.logger.add([epoch,
+				# Per-group profile Pearson for the detail log. The
+				# raw `measures['profile_pearson']` is shape
+				# (n_loci, sum(signal_groups)); for each group, average
+				# over its channels and the locus dim. ATAC ends up
+				# with one number; a stranded (+, -) group ends up
+				# with one number (the mean of its two strands).
+				per_group_profile_corr = []
+				offset = 0
+				for g in self.signal_groups:
+					chunk = valid_profile_corr[:, offset:offset+g]
+					per_group_profile_corr.append(float(chunk.mean()))
+					offset += g
+
+				summary_row = [epoch,
 					iteration,
 					train_time,
 					valid_time,
@@ -556,9 +586,14 @@ class Cherimoya(torch.nn.Module):
 					valid_profile_corr.mean(),
 					valid_count_corr,
 					valid_count_loss.mean().item(),
-					(valid_count_corr > best_corr).item()])
+					(valid_count_corr > best_corr).item()]
+				self.logger.add(summary_row)
+				self.detail_logger.add(summary_row
+					+ per_group_profile_corr
+					+ [float(v) for v in valid_count_per_group.tolist()])
 
 				self.logger.save("{}.log".format(self.name))
+				self.detail_logger.save("{}.detailed.log".format(self.name))
 
 				if valid_count_corr > best_corr:
 					self.save("{}.torch".format(self.name))

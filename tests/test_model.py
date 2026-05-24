@@ -267,6 +267,26 @@ def test_grouped_model_fit_smoke(tmp_path):
 	import math
 	assert math.isfinite(float(best))
 
+	# Both log files exist. The summary log has the original column
+	# set; the detail log appends one ProfilePearson/CountPearson
+	# column per signal group (here [1, 2] -> two groups -> four
+	# extra columns).
+	summary_log = tmp_path / "smoke.log"
+	detail_log = tmp_path / "smoke.detailed.log"
+	assert summary_log.exists(), "summary log not written"
+	assert detail_log.exists(), "detail log not written"
+
+	summary_header = summary_log.read_text().splitlines()[0].split("\t")
+	detail_header = detail_log.read_text().splitlines()[0].split("\t")
+
+	# Detail header strictly extends the summary header.
+	assert detail_header[:len(summary_header)] == summary_header
+	extra = detail_header[len(summary_header):]
+	assert extra == [
+		"ProfilePearson_g0", "ProfilePearson_g1",
+		"CountPearson_g0", "CountPearson_g1",
+	], "unexpected detail columns: {}".format(extra)
+
 
 def test_signal_groups_round_trips_through_save_load(tmp_path):
 	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1, 2],

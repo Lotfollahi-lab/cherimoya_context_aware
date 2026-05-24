@@ -53,6 +53,16 @@ Data pipeline (**breaking**)
   ``signals=[[plus, minus], [plus, minus]]`` (two stranded models)
   must now write ``signals=[[[plus, minus]], [[plus, minus]]]`` — see
   the batch section of :doc:`cli` for details.
+* Training now writes two log files instead of one. ``{name}.log``
+  is the existing summary log (same columns as before, printed to
+  stdout when ``verbose=True``). ``{name}.detailed.log`` is a new
+  disk-only TSV that extends the summary columns with one
+  ``ProfilePearson_g{i}`` and one ``CountPearson_g{i}`` column per
+  signal group — useful for offline per-modality analysis. The
+  detail log never prints to stdout, so models with hundreds of
+  groups still get a readable terminal. Best-model selection
+  continues to use the mean-across-groups count Pearson and is
+  unchanged.
 
 Model (**breaking**)
 ~~~~~~~~~~~~~~~~~~~~
