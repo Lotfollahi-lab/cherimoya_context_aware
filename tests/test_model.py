@@ -302,7 +302,7 @@ def test_signal_groups_round_trips_through_save_load(tmp_path):
 
 
 @pytest.mark.parametrize("signal_groups,expected_lw0,expected_lw1", [
-	([1],       (1,), (1,)),  # single unstranded — matches every pre-grouping checkpoint
+	([1],       (1,), (1,)),  # single unstranded (the default)
 	([1, 1, 1], (3,), (3,)),  # three unstranded groups — one weight per group
 	([1, 2],    (2,), (2,)),  # mixed: one profile loss term per *group*
 	([2],       (1,), (1,)),  # one stranded pair: 2 profile channels share one loss
@@ -323,15 +323,13 @@ def test_lw0_lw1_shapes(signal_groups, expected_lw0, expected_lw1):
 
 
 @pytest.mark.parametrize("signal_groups", [
-	[1],          # the format every pre-grouping checkpoint was saved in
+	[1],          # single unstranded (the default)
 	[1, 1, 1],    # all unstranded
 	[1, 2],       # mixed
 ])
 def test_lw0_lw1_save_load_round_trip(tmp_path, signal_groups):
-	"""Save/load preserves lw0/lw1 shapes and values across all grouping
-	shapes. The ``[1]`` case also exercises back-compat with checkpoints
-	saved before lw0/lw1 became vectors (where the state_dict already
-	stored shape (1,))."""
+	"""Save/load preserves lw0/lw1 shapes and values across all
+	grouping shapes."""
 
 	model = Cherimoya(n_filters=8, n_layers=2,
 		signal_groups=signal_groups, verbose=False)

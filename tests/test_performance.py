@@ -1,7 +1,5 @@
 """Tests for the performance-measure utilities."""
 
-import math
-
 import numpy
 import pytest
 import torch
