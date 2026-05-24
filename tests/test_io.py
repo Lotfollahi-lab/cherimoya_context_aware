@@ -598,6 +598,75 @@ def test_control_perm_follows_same_rule_under_rc():
 	assert torch.equal(X_ctl, expected_ctl)
 
 
+@pytest.mark.parametrize("signal_group_sizes,control_group_sizes", [
+	# Stranded signal + unstranded control: signal swaps, control just
+	# flips length.
+	([2],       [1]),
+	# Stranded signal + stranded control: both swap independently.
+	([2],       [2]),
+	# Mixed signal + stranded control: the user's third scenario —
+	# unstranded ATAC + stranded TF signals plus a stranded input
+	# control. Each grouping is computed independently.
+	([1, 2],    [2]),
+	# Mixed signal + unstranded control.
+	([1, 2],    [1]),
+	# Mixed signal + mixed control with a *different* group layout —
+	# confirms signal and control groupings are fully orthogonal.
+	([1, 2],    [1, 1, 2]),
+	# Two stranded signal groups + one stranded control: every group
+	# is its own little swap.
+	([2, 2],    [2]),
+])
+def test_signal_and_control_grouping_are_independent_under_rc(
+		signal_group_sizes, control_group_sizes):
+	"""Signal-group structure and control-group structure are
+	orthogonal: each gets its own precomputed channel permutation, and
+	the per-group swaps inside each happen independently. This is the
+	contract that lets users mix a stranded ChIP control with an
+	unstranded ATAC signal (or any other combination) without manual
+	intervention."""
+
+	sampler, peak_signals, peak_controls = _make_multichannel_sampler(
+		group_sizes=signal_group_sizes,
+		control_group_sizes=control_group_sizes,
+		n_peaks=24)
+
+	rc_idx, non_rc_idx = _rc_idx(sampler, 24)
+	assert rc_idx is not None and non_rc_idx is not None
+
+	# Non-RC: both tensors come through untouched.
+	X, X_ctl, y, _ = sampler[non_rc_idx]
+	src = sampler._source_idx[non_rc_idx]
+	assert torch.equal(y, peak_signals[src])
+	assert torch.equal(X_ctl, peak_controls[src])
+
+	# RC: each tensor gets its own group's permutation, then length flip.
+	X, X_ctl, y, _ = sampler[rc_idx]
+	src = sampler._source_idx[rc_idx]
+
+	expected_signal_perm = channel_permutation_from_groups(signal_group_sizes)
+	expected_control_perm = channel_permutation_from_groups(control_group_sizes)
+	expected_y = peak_signals[src][expected_signal_perm].flip(-1)
+	expected_ctl = peak_controls[src][expected_control_perm].flip(-1)
+	assert torch.equal(y, expected_y)
+	assert torch.equal(X_ctl, expected_ctl)
+
+
+def test_signal_and_control_can_have_different_group_counts():
+	"""len(signal_groups) need not equal len(control_groups). Confirm
+	the sampler doesn't impose any cross-shape constraint — controls
+	are an independent input modality, not a per-signal-group thing."""
+
+	sampler, _, _ = _make_multichannel_sampler(
+		group_sizes=[1, 2, 1],          # 3 signal groups
+		control_group_sizes=[2],         # 1 control group
+		n_peaks=8)
+	# Smoke: every index produces a valid sample.
+	for i in range(len(sampler)):
+		out = sampler[i]
+		assert len(out) == 4   # X, X_ctl, y, label
+
+
 def test_no_perm_falls_back_to_length_only_flip():
 	"""When signal_perm=None and reverse_complement=True the channel dim
 	stays in place — only length is flipped. (This is what a caller
