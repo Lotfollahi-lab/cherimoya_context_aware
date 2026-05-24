@@ -49,7 +49,9 @@ Where to start
 * **Researchers** using Cherimoya from Python: read
   :doc:`installation`, then :doc:`tutorials/python_api`, then explore
   :doc:`tutorials/attribution`, :doc:`tutorials/variant_effect`, and
-  :doc:`tutorials/save_load`.
+  :doc:`tutorials/save_load`. For models that predict more than one
+  modality from a shared backbone — stranded ChIP-seq, or
+  co-training ATAC alongside several TFs — see :doc:`multi_task`.
 * **Developers** integrating Cherimoya or contributing to it: read
   :doc:`development` for repo layout and the test suite, then
   :doc:`architecture` and the :doc:`api/model` / :doc:`api/cheri`
@@ -101,6 +103,7 @@ measured numbers.
    :caption: User Guide
 
    architecture
+   multi_task
    benchmarks
    troubleshooting
    development
