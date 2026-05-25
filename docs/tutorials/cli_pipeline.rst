@@ -278,9 +278,17 @@ directory (with ``{name}`` from the ``-n`` flag in step 1):
    * - ``{name}.final.torch``
      - Final EMA-applied checkpoint at end of training.
    * - ``{name}.log``
-     - Per-epoch training and validation metrics (TSV).
+     - Per-epoch training and validation metrics (TSV). Same
+       columns regardless of how many signal groups the model has.
+   * - ``{name}.detailed.log``
+     - Same as ``{name}.log`` plus one ``ProfilePearson_g{i}`` and
+       one ``CountPearson_g{i}`` column per signal group, for
+       offline per-modality analysis. Never printed to stdout.
    * - ``{name}.performance.tsv``
-     - Final held-out chromosome metrics (single row TSV).
+     - Final held-out chromosome metrics. One TSV row per signal
+       group, in ``signal_groups`` order; single-group models
+       write exactly one row. Same seven metric columns as the
+       summary log.
    * - ``{name}.+.bw`` / ``{name}.-.bw``
      - bigWigs produced by ``bam2bw`` for the stranded signal.
    * - ``{name}.bw``

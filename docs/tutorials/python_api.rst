@@ -295,6 +295,9 @@ counts, and predicted log counts, and returns a dict of tensors:
 
 If ``measures`` is ``None`` (the default), all built-in measures are
 computed. The full list and signature is in :doc:`../api/performance`.
+For multi-group models (see :doc:`../multi_task`), pass
+``signal_groups=model.signal_groups`` so the count metrics are
+computed per group rather than against a single total target.
 
 
 Interpreting the metrics
