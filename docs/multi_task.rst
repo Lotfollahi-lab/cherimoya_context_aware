@@ -444,6 +444,30 @@ with three hundred groups you get six hundred. Use this file when
 you need to see whether one particular modality is failing while the
 others train fine.
 
+The ``cherimoya evaluate`` performance TSV
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``cherimoya evaluate`` writes a ``{name}.performance.tsv`` file with
+the same seven columns as before (``profile_mnll``, ``profile_jsd``,
+``profile_pearson``, ``profile_spearman``, ``count_pearson``,
+``count_spearman``, ``count_mse``). When the loaded model has more
+than one signal group the file has **one row per group**, in
+``signal_groups`` order — row 0 holds the metrics for the first
+group, row 1 for the second, and so on. Profile metrics are pooled
+the same way the training-time per-group profile Pearson is (mean
+over the group's channels and the validation loci); count metrics
+are read out of the per-group ``(n_groups,)`` tensors that
+``calculate_performance_measures`` already produces.
+
+Single-group models still write exactly one data row, byte-identical
+to the prior ``.mean()``-of-everything format — a single-group model
+trained today and evaluated tomorrow produces the same TSV as the
+single-group model trained before this grouping change.
+
+There is no group-identifier column. The row order is the contract;
+in a Python consumer, pairing the rows with ``signal_groups`` from
+the model checkpoint identifies each row's modality.
+
 Best-model selection (which epoch's weights get saved as the
 ``{name}.torch`` checkpoint) uses the mean-across-groups count
 Pearson — the same scalar shown in the summary log's "Validation

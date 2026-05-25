@@ -63,6 +63,16 @@ Data pipeline (**breaking**)
   groups still get a readable terminal. Best-model selection
   continues to use the mean-across-groups count Pearson and is
   unchanged.
+* ``cherimoya evaluate`` writes one row per signal group to its
+  performance TSV. The seven columns are unchanged
+  (``profile_mnll``, ``profile_jsd``, ``profile_pearson``,
+  ``profile_spearman``, ``count_pearson``, ``count_spearman``,
+  ``count_mse``); rows are in ``signal_groups`` order. Single-group
+  models write exactly one row, byte-identical to the legacy
+  ``.mean()``-of-everything line. Multi-group models write N rows
+  for N groups, with no extra identifier column — pair the rows
+  with the model's ``signal_groups`` to recover which row belongs
+  to which modality.
 * Every signal group now contributes one term to the loss
   regardless of how many channels it has. ``_mixture_loss``'s
   profile component is averaged within each group (so a stranded

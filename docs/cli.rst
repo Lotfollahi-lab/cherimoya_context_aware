@@ -572,12 +572,20 @@ JSON schema:
      - Optional regions to exclude.
    * - ``performance_filename``
      - ``"performance.tsv"``
-     - TSV with one row of summary metrics.
+     - TSV with one row per signal group.
 
-The TSV reports the mean of the following measures across examples:
+The TSV columns are
 ``profile_mnll``, ``profile_jsd``, ``profile_pearson``,
 ``profile_spearman``, ``count_pearson``, ``count_spearman``,
-``count_mse``.
+``count_mse``. The file has one data row per signal group, in
+``signal_groups`` order — for a single-group model (the default) this
+is a single row holding the same per-group mean that
+``calculate_performance_measures`` returns; for a multi-group model
+row ``i`` corresponds to ``signal_groups[i]``. Profile metrics are
+the mean of the metric over (validation loci × the group's
+channels); count metrics are read directly from the per-group
+``(n_groups,)`` tensors. See :doc:`multi_task` for an in-depth
+description.
 
 
 cherimoya attribute
