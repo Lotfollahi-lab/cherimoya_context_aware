@@ -15,6 +15,14 @@ PeakGenerator
 .. autofunction:: PeakGenerator
 
 
+Signal group helpers
+--------------------
+
+.. autofunction:: normalize_signal_groups
+
+.. autofunction:: channel_permutation_from_groups
+
+
 PeakNegativeSampler
 -------------------
 

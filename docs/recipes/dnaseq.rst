@@ -45,7 +45,7 @@ Flag-by-flag:
 
 For a stranded variant, omit ``-u``. Cherimoya will then produce two
 output tracks (+ and - strand) and the trained model will have
-``n_outputs=2``.
+``signal_groups=[2]`` (one stranded group).
 
 
 Run the pipeline
@@ -62,8 +62,8 @@ Steps invoked, in order:
 2. ``bam2bw`` converts the BAM to an unstranded bigWig
    (``dnase_experiment.bw``).
 3. GC-matched negative sampling (``dnase_experiment.negatives.bed``).
-4. Train a 9-layer 96-filter Cherimoya model with ``n_outputs=1`` and
-   ``n_control_tracks=0``.
+4. Train a 9-layer 96-filter Cherimoya model with
+   ``signal_groups=[1]`` and ``n_control_tracks=0``.
 5. Compute count attributions via saturation mutagenesis on the
    validation chromosomes.
 6. Call seqlets, annotate with tomtom-lite.

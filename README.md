@@ -34,7 +34,7 @@ GPU acceleration requires Triton and a CUDA-capable device; a pure-PyTorch CPU f
 
 ### What you can do with Cherimoya
 
-- Train a sequence-to-function model on [TF ChIP-seq](https://cherimoya.readthedocs.io/en/latest/recipes/chipseq_tf.html), [ATAC-seq](https://cherimoya.readthedocs.io/en/latest/recipes/atacseq.html), [DNase-seq](https://cherimoya.readthedocs.io/en/latest/recipes/dnaseq.html), or any signal that can be expressed as a stranded or unstranded coverage track.
+- Train a sequence-to-function model on [TF ChIP-seq](https://cherimoya.readthedocs.io/en/latest/recipes/chipseq_tf.html), [ATAC-seq](https://cherimoya.readthedocs.io/en/latest/recipes/atacseq.html), [DNase-seq](https://cherimoya.readthedocs.io/en/latest/recipes/dnaseq.html), or any signal that can be expressed as a stranded or unstranded coverage track. Multi-task models that share a backbone across several modalities — for example ATAC co-trained with several stranded TFs — are also supported; see [the multi-task guide](https://cherimoya.readthedocs.io/en/latest/multi_task.html).
 - Compute per-base attribution scores via [*in silico* saturation mutagenesis](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html).
 - Call seqlets and discover *de novo* motifs with [TF-MoDISco](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html#tf-modisco-motif-discovery).
 - Annotate seqlets against a known motif database via [tomtom-lite](https://cherimoya.readthedocs.io/en/latest/tutorials/attribution.html#tomtom-lite-annotation).
@@ -106,7 +106,7 @@ For programmatic use, the three public symbols are `Cherimoya` (the model), `Che
 ```python
 from cherimoya import Cherimoya
 
-model = Cherimoya(n_filters=96, n_layers=9, n_outputs=1).cuda()
+model = Cherimoya(n_filters=96, n_layers=9).cuda()
 y_profile, y_counts = model(X)              # X: (N, 4, L) one-hot DNA
 ```
 

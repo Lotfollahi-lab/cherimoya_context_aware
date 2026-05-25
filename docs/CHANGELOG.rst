@@ -1,6 +1,119 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+Data pipeline (**breaking**)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Fixed a reverse-complement bug in
+  :class:`cherimoya.io.PeakNegativeSampler` that scrambled tracks when
+  training on a mix of unstranded and stranded signals (e.g.
+  co-training ATAC with a stranded TF). Previously,
+  ``torch.flip(yi, [0, 1])`` flipped both the channel dimension and the
+  length dimension, which was only correct when *every* track was
+  unstranded (no-op channel flip) or *every* track was part of one
+  stranded pair (clean +/- swap). With a mix of three or more tracks
+  the channel flip cross-wired the modalities. The sampler now applies
+  a per-group channel permutation (precomputed once from the group
+  structure) plus a length-only flip, so each group's internal
+  channels are swapped independently and groups never bleed into one
+  another.
+* The ``signals`` and ``controls`` API now accepts a **grouped** form
+  in addition to a flat list. Each entry of the outer list is one
+  group — either a ``str`` (one-channel unstranded group) or a
+  ``list[str]`` (multi-channel group, e.g. a stranded ``(+, -)``
+  pair). Example::
+
+      signals = ["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"]]
+
+  *Breaking semantic change:* a flat list of N files is now
+  interpreted as N independent **unstranded** groups, not as a single
+  N-channel block. BPNet-style callers that previously passed
+  ``["plus.bw", "minus.bw"]`` as a stranded pair must update to the
+  nested form ``[["plus.bw", "minus.bw"]]``.
+* Added :func:`cherimoya.io.normalize_signal_groups` and
+  :func:`cherimoya.io.channel_permutation_from_groups` as the public
+  helpers callers can use to convert between the grouped form and the
+  flat (file-list, group-sizes) form, and to derive the per-group RC
+  permutation.
+* :func:`cherimoya.io.PeakGenerator`'s outlier filter is now
+  per-group: it computes one 99th-percentile-times-1.2 threshold per
+  signal group and drops a locus if it's an outlier in *any* group.
+  Previously the threshold was computed over the sum of counts across
+  all channels and the full length, which collapsed distinct
+  modalities into one number — a TF with peaks two orders of
+  magnitude higher than a co-trained ATAC track would dominate the
+  threshold. The single-group case reduces exactly to the legacy
+  behavior.
+* The ``cherimoya batch`` command's ``signals`` JSON field is now a
+  list of *per-model* signal specs, with each entry itself in the new
+  grouped form. Stranded batch jobs that previously wrote
+  ``signals=[[plus, minus], [plus, minus]]`` (two stranded models)
+  must now write ``signals=[[[plus, minus]], [[plus, minus]]]`` — see
+  the batch section of :doc:`cli` for details.
+* Training now writes two log files instead of one. ``{name}.log``
+  is the existing summary log (same columns as before, printed to
+  stdout when ``verbose=True``). ``{name}.detailed.log`` is a new
+  disk-only TSV that extends the summary columns with one
+  ``ProfilePearson_g{i}`` and one ``CountPearson_g{i}`` column per
+  signal group — useful for offline per-modality analysis. The
+  detail log never prints to stdout, so models with hundreds of
+  groups still get a readable terminal. Best-model selection
+  continues to use the mean-across-groups count Pearson and is
+  unchanged.
+* ``cherimoya evaluate`` writes one row per signal group to its
+  performance TSV. The seven columns are unchanged
+  (``profile_mnll``, ``profile_jsd``, ``profile_pearson``,
+  ``profile_spearman``, ``count_pearson``, ``count_spearman``,
+  ``count_mse``); rows are in ``signal_groups`` order. Single-group
+  models write exactly one row, byte-identical to the legacy
+  ``.mean()``-of-everything line. Multi-group models write N rows
+  for N groups, with no extra identifier column — pair the rows
+  with the model's ``signal_groups`` to recover which row belongs
+  to which modality.
+* Every signal group now contributes one term to the loss
+  regardless of how many channels it has. ``_mixture_loss``'s
+  profile component is averaged within each group (so a stranded
+  ``(+, -)`` pair's two per-strand MNLLs combine into one
+  per-group profile loss) before Kendall-Gal weighting; ``lw0``
+  drops from shape ``(sum(signal_groups),)`` to
+  ``(len(signal_groups),)``, matching ``lw1``. The summary log's
+  ``Validation Profile Pearson`` now reports the mean over groups
+  of (mean over the group's channels) so the headline metric
+  agrees with the loss weighting — no double-counting of stranded
+  pairs. Single-track models (``signal_groups=[1]``) are
+  unaffected: every shape and value collapses to ``(1,)`` as
+  before.
+
+Model (**breaking**)
+~~~~~~~~~~~~~~~~~~~~
+
+* The ``Cherimoya`` constructor now takes ``signal_groups`` (list of
+  per-group channel counts) instead of ``n_outputs``.
+  ``signal_groups`` controls both the profile head width
+  (``sum(signal_groups)``) and the count head width (always
+  ``len(signal_groups)``). So a stranded ``(+, -)`` pair emits two
+  profile channels but a single count prediction — the per-strand
+  counts are always tied. ``n_outputs`` is removed as a constructor
+  kwarg; ``model.n_outputs`` is retained as a derived attribute equal
+  to ``sum(signal_groups)``.
+* Removed the ``single_count_output`` constructor flag. The count head
+  is now always one prediction per signal group; the legacy
+  "collapse every channel into one shared scalar" mode is gone
+  because in the grouped formulation it conflates distinct biological
+  modalities.
+* Pre-grouping checkpoints (whose ``config`` dict stored ``n_outputs``
+  / ``single_count_output``) no longer load. The project is too early
+  to carry a back-compat shim; retrain with the new API.
+* :func:`cherimoya.losses._mixture_loss` and
+  :func:`cherimoya.performance.calculate_performance_measures` both
+  accept an optional ``signal_groups`` argument. When supplied, the
+  true counts are pooled per group before the count loss / count
+  Pearson are computed, so a stranded pair contributes a single
+  per-group target instead of one per strand.
+
 v0.1.0
 ------
 

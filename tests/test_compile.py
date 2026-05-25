@@ -19,8 +19,8 @@ from cherimoya import Cherimoya
 
 # Use a tiny config everywhere so CPU runs stay fast.
 def _tiny_kwargs(**overrides):
-	base = dict(n_filters=8, n_layers=3, n_outputs=1, n_control_tracks=0,
-		single_count_output=True, verbose=False)
+	base = dict(n_filters=8, n_layers=3, signal_groups=[1],
+		n_control_tracks=0, verbose=False)
 	base.update(overrides)
 	return base
 

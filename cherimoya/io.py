@@ -8,6 +8,156 @@ import torch
 from tangermeme.io import extract_loci
 
 
+def _validate_signal_groups(groups, label='signal_groups'):
+	"""Validate a signal-group spec used by the model, loss, and data path.
+
+	Every entry must be a positive integer (size 0 is meaningless — a
+	group with no channels can't be permuted, summed, or matched
+	against a count head) and the list itself must be non-empty (an
+	empty list means "zero output channels", which would produce a
+	degenerate model). Raises a ``ValueError`` with a clear message
+	naming the bad value so the user can fix the JSON or kwarg.
+
+
+	Parameters
+	----------
+	groups : sequence
+		The candidate ``signal_groups`` / ``control_groups`` value to
+		validate.
+
+	label : str, optional
+		The kwarg or field name to mention in the error message — lets
+		the same helper produce useful errors from different call sites
+		(``signal_groups``, ``control_groups``, etc.). Default is
+		``'signal_groups'``.
+	"""
+
+	if not isinstance(groups, (list, tuple)):
+		raise ValueError(
+			"{} must be a list of positive ints; got {!r}"
+			.format(label, groups))
+	if len(groups) == 0:
+		raise ValueError(
+			"{} must be non-empty; got an empty list".format(label))
+	for g in groups:
+		if (not isinstance(g, int)) or isinstance(g, bool) or g < 1:
+			raise ValueError(
+				"{} entries must be positive ints; got {!r} in {!r}"
+				.format(label, g, list(groups)))
+
+
+def normalize_signal_groups(signals):
+	"""Normalize a structured ``signals``/``controls`` spec into flat files.
+
+	Cherimoya organizes signals into *groups* so reverse-complement
+	augmentation can swap channels correctly. Each group is one biological
+	modality whose channels share an orientation: an unstranded track is a
+	single-channel group; a stranded ``(+, -)`` pair is a two-channel group.
+
+	Accepted inputs::
+
+		None
+			Returns ``(None, [])``.
+
+		[str, str, ...]
+			A flat list of N files. Each file is treated as its **own**
+			single-channel (unstranded) group. (Note: this is a breaking
+			change relative to pre-grouping cherimoya, where a flat
+			two-element list was implicitly a stranded pair. Old BPNet
+			callers should now wrap the pair: ``[["plus.bw", "minus.bw"]]``.)
+
+		[entry, entry, ...]
+			A list whose entries are each either a single ``str`` (a
+			one-channel group, shorthand for ``[str]``) or a ``list[str]``
+			(a multi-channel group). Mix freely, e.g.::
+
+				signals = ["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"]]
+
+			declares two groups: one unstranded ATAC channel and one
+			stranded CTCF pair.
+
+	Parameters
+	----------
+	signals : None, list of str, or list of (str or list of str)
+		The structured signals spec as described above.
+
+
+	Returns
+	-------
+	flat_files : list of str or None
+		The files in concatenation order across groups. ``None`` if
+		``signals`` was ``None``. This is the form that ``extract_loci``
+		consumes.
+
+	group_sizes : list of int
+		The number of channels in each group, in the same order. Empty
+		list if ``signals`` was ``None``.
+	"""
+
+	if signals is None:
+		return None, []
+
+	if not isinstance(signals, (list, tuple)):
+		raise TypeError("signals must be a list/tuple or None; got {!r}"
+			.format(type(signals).__name__))
+
+	flat = []
+	groups = []
+	for entry in signals:
+		if isinstance(entry, str):
+			flat.append(entry)
+			groups.append(1)
+		elif isinstance(entry, (list, tuple)):
+			if len(entry) == 0:
+				raise ValueError("signal group is empty")
+			for f in entry:
+				if not isinstance(f, str):
+					raise TypeError(
+						"signal group entries must be strings; got {!r}"
+						.format(type(f).__name__))
+				flat.append(f)
+			groups.append(len(entry))
+		else:
+			raise TypeError(
+				"signal entries must be str or list[str]; got {!r}"
+				.format(type(entry).__name__))
+
+	return flat, groups
+
+
+def channel_permutation_from_groups(group_sizes):
+	"""Build the channel permutation applied to per-locus signals under RC.
+
+	Within each group the channels are reversed in place — a 1-channel
+	group stays put (identity), a 2-channel ``(+, -)`` group becomes
+	``(-, +)``. Groups keep their relative order: they're independent
+	modalities and must not bleed into each other under augmentation.
+
+
+	Parameters
+	----------
+	group_sizes : sequence of int
+		The size of each group, e.g. ``[1, 2]`` for an unstranded ATAC
+		track followed by a stranded CTCF pair.
+
+
+	Returns
+	-------
+	perm : torch.LongTensor, shape=(sum(group_sizes),)
+		Index tensor such that ``y[perm].flip(-1)`` is the correct RC of a
+		``(n, sum(group_sizes), L)`` signal tensor.
+	"""
+
+	_validate_signal_groups(group_sizes, label='group_sizes')
+
+	perm = []
+	offset = 0
+	for g in group_sizes:
+		perm.extend(range(offset + g - 1, offset - 1, -1))
+		offset += g
+	return torch.tensor(perm, dtype=torch.long)
+
+
 class PeakNegativeSampler(torch.utils.data.Dataset):
 	"""A data generator mimicking the BPNet data loading procedure.
 
@@ -73,12 +223,25 @@ class PeakNegativeSampler(torch.utils.data.Dataset):
 		Base seed for the deterministic per-epoch RNG. If None, a random
 		seed is captured once at construction time so that all forked
 		worker processes share it.
+
+	signal_perm: torch.LongTensor or None, optional
+		The channel permutation to apply to ``peak_signals`` /
+		``negative_signals`` under reverse-complement augmentation. If
+		``None``, no channel permutation is applied (only the length
+		dimension is flipped). This must be precomputed by the caller
+		from the signal-group structure — see
+		:func:`channel_permutation_from_groups`. Default is None.
+
+	control_perm: torch.LongTensor or None, optional
+		Same as ``signal_perm`` but applied to the control tracks. Default
+		is None.
 	"""
 
 	def __init__(self, peak_sequences, peak_signals, negative_sequences,
 		negative_signals, peak_controls=None, negative_controls=None,
 		negative_ratio=0.1, in_window=2114, out_window=1000, max_jitter=0,
-		reverse_complement=False, shuffle=True, random_state=None):
+		reverse_complement=False, shuffle=True, random_state=None,
+		signal_perm=None, control_perm=None):
 		if max_jitter < 0:
 			raise ValueError("max_jitter must be non-negative, got {}"
 				.format(max_jitter))
@@ -107,6 +270,33 @@ class PeakNegativeSampler(torch.utils.data.Dataset):
 		self.max_jitter = max_jitter
 		self.reverse_complement = reverse_complement
 		self.shuffle = shuffle
+
+		# Stored as torch.long tensors so they can index the per-sample
+		# torch tensors built in `__getitem__`. The perm tensors are
+		# tiny (one element per signal channel) so the construction-
+		# time copy is negligible.
+		self.signal_perm = (None if signal_perm is None
+			else torch.as_tensor(signal_perm, dtype=torch.long))
+		self.control_perm = (None if control_perm is None
+			else torch.as_tensor(control_perm, dtype=torch.long))
+
+		if self.signal_perm is not None:
+			if self.signal_perm.shape[0] != self.peak_signals.shape[1]:
+				raise ValueError(
+					"signal_perm length ({}) does not match peak_signals "
+					"channel count ({})".format(
+						self.signal_perm.shape[0],
+						self.peak_signals.shape[1]))
+		if self.control_perm is not None:
+			if self.peak_controls is None:
+				raise ValueError(
+					"control_perm was supplied but peak_controls is None")
+			if self.control_perm.shape[0] != self.peak_controls.shape[1]:
+				raise ValueError(
+					"control_perm length ({}) does not match peak_controls "
+					"channel count ({})".format(
+						self.control_perm.shape[0],
+						self.peak_controls.shape[1]))
 
 		# Capture one base seed at construction so every forked worker
 		# inherits the same value (2654435761 is Knuth's hash constant,
@@ -186,11 +376,24 @@ class PeakNegativeSampler(torch.utils.data.Dataset):
 		Xi_ctl = (torch.from_numpy(X_ctl[src][:, j:j+self.in_window])
 			if self.peak_controls is not None else None)
 
+		# Reverse-complement: channel permutation + length flip. For the
+		# DNA sequence the channel perm is the simple ACGT -> TGCA flip
+		# (which `torch.flip` on dim 0 of a length-4 axis does
+		# correctly). For signals/controls the channel permutation
+		# depends on the group structure — see
+		# `channel_permutation_from_groups`. The permutation is
+		# precomputed once at construction so the per-call cost is just
+		# an indexed slice plus a length flip — same big-O as the legacy
+		# single-track behavior, even when many groups are stacked.
 		if self._rc_flags[idx]:
 			Xi = torch.flip(Xi, [0, 1])
-			yi = torch.flip(yi, [0, 1])
+			if self.signal_perm is not None:
+				yi = yi[self.signal_perm]
+			yi = torch.flip(yi, [-1])
 			if Xi_ctl is not None:
-				Xi_ctl = torch.flip(Xi_ctl, [0, 1])
+				if self.control_perm is not None:
+					Xi_ctl = Xi_ctl[self.control_perm]
+				Xi_ctl = torch.flip(Xi_ctl, [-1])
 
 		if Xi_ctl is not None:
 			return Xi, Xi_ctl, yi, int(is_peak)
@@ -202,7 +405,8 @@ def PeakGenerator(peaks, negatives, sequences, signals, controls=None,
 	chroms=None, in_window=2114, out_window=1000, max_jitter=50,
 	negative_ratio=0.1, reverse_complement=True, shuffle=True, min_counts=None,
 	max_counts=None, summits=False, exclusion_lists=None, random_state=None,
-	pin_memory=True, num_workers=1, batch_size=32, verbose=False):
+	pin_memory=True, num_workers=1, batch_size=32, verbose=False,
+	signal_groups=None, control_groups=None):
 	"""This is a constructor function that handles all IO.
 
 	This function will extract signal from all signal and control files,
@@ -229,17 +433,32 @@ def PeakGenerator(peaks, negatives, sequences, signals, controls=None,
 		keys are the unique set of chromosoms and the values are one-hot
 		encoded sequences as numpy arrays or memory maps.
 
-	signals: list of strs or list of dictionaries
-		A list of filepaths to bigwig files, where each filepath will be read
-		using pyBigWig, or a list of dictionaries where the keys are the same
-		set of unique chromosomes and the values are numpy arrays or memory
-		maps.
+	signals: list of strs, list of (str or list of str), or list of dictionaries
+		The signal-track specification. There are two accepted shapes:
 
-	controls: list of strs or list of dictionaries or None, optional
-		A list of filepaths to bigwig files, where each filepath will be read
-		using pyBigWig, or a list of dictionaries where the keys are the same
-		set of unique chromosomes and the values are numpy arrays or memory
-		maps. If None, no control tensor is returned. Default is None.
+		1. A flat list of strings — each element is a one-channel
+		   (unstranded) group. This is the common ATAC/DNase case.
+
+		2. A list whose entries are each either a ``str`` (a one-channel
+		   group, shorthand for ``[str]``) or a ``list[str]`` (a multi-
+		   channel group, e.g. a stranded ``(+, -)`` pair). Mix freely::
+
+		       signals = ["atac.bw", ["ctcf.+.bw", "ctcf.-.bw"]]
+
+		Each group's channels share an orientation and get swapped under
+		reverse-complement augmentation; groups never bleed into one
+		another. See :func:`normalize_signal_groups`.
+
+		A list of per-chromosome dictionaries is also accepted (one
+		dictionary per channel, in the same concatenation order produced
+		by :func:`normalize_signal_groups`). In that case the caller
+		must pass ``signal_groups`` explicitly so this function knows
+		how to group the channels.
+
+	controls: same shape as ``signals``, or None, optional
+		The control-track specification, sharing the same grouping rule
+		as ``signals``. If None, no control tensor is returned. Default
+		is None.
 
 	chroms: list or None, optional
 		A set of chromosomes to extact loci from. Loci in other chromosomes
@@ -317,6 +536,17 @@ def PeakGenerator(peaks, negatives, sequences, signals, controls=None,
 	verbose: bool, optional
 		Whether to display a progress bar while loading. Default is False.
 
+	signal_groups: list of int or None, optional
+		The size of each group in ``signals``. When ``signals`` is given
+		as a list of strings or as a structured (mixed) list this is
+		derived automatically. Must be supplied explicitly only when
+		``signals`` is a flat list of per-chromosome dictionaries (no
+		group information can be inferred from that form). Default is
+		None.
+
+	control_groups: list of int or None, optional
+		Same as ``signal_groups`` but for ``controls``. Default is None.
+
 
 	Returns
 	-------
@@ -324,16 +554,77 @@ def PeakGenerator(peaks, negatives, sequences, signals, controls=None,
 		A PyTorch DataLoader wrapped DataGenerator object.
 	"""
 
+	# Normalize structured (list-of-lists / mixed) signal specs into a
+	# flat file list plus per-group sizes. When signals are already
+	# provided as a list of dictionaries we leave them alone and require
+	# the caller to pass signal_groups explicitly — there's no way to
+	# infer grouping from raw dicts.
+	def _resolve(spec, explicit_groups, label):
+		if spec is None:
+			return None, []
+		# A list of per-chromosome dicts (the in-memory shortcut some
+		# callers use to avoid bigWig IO) can't be parsed by
+		# `normalize_signal_groups`, so handle it explicitly. The
+		# isinstance check is tight on purpose — anything that isn't a
+		# dict, str, or sub-list is a user mistake (e.g. an int passed
+		# by accident) and is better surfaced here than 200 lines later
+		# inside `extract_loci`.
+		if isinstance(spec, (list, tuple)) and len(spec) > 0 \
+				and isinstance(spec[0], dict):
+			if explicit_groups is None:
+				explicit_groups = [1] * len(spec)
+			else:
+				_validate_signal_groups(explicit_groups,
+					label='{}_groups'.format(label))
+			if sum(explicit_groups) != len(spec):
+				raise ValueError(
+					"{}_groups sum ({}) does not match number of {} "
+					"channels ({})".format(label, sum(explicit_groups),
+						label, len(spec)))
+			return list(spec), list(explicit_groups)
+		flat, groups = normalize_signal_groups(spec)
+		if explicit_groups is not None:
+			_validate_signal_groups(explicit_groups,
+				label='{}_groups'.format(label))
+			if list(explicit_groups) != groups:
+				raise ValueError(
+					"{}_groups={} disagrees with the grouping inferred "
+					"from {}={}".format(label, list(explicit_groups),
+						label, groups))
+		return flat, groups
+
+	signals, signal_groups = _resolve(signals, signal_groups, 'signal')
+	controls, control_groups = _resolve(controls, control_groups, 'control')
+
+	signal_perm = (channel_permutation_from_groups(signal_groups)
+		if signal_groups else None)
+	control_perm = (channel_permutation_from_groups(control_groups)
+		if control_groups else None)
+
 	X_peaks = extract_loci(loci=peaks, sequences=sequences,
 		signals=signals, in_signals=controls, chroms=chroms, in_window=in_window,
 		out_window=out_window, max_jitter=max_jitter, min_counts=min_counts,
 		max_counts=max_counts, summits=summits, exclusion_lists=exclusion_lists,
 		ignore=list('QWERYUIOPSDFHJKLZXVBNM'), return_mask=True, verbose=verbose)
 
-	loci_counts = X_peaks[1].sum(dim=(1, 2))
-
-	outlier_threshold = torch.quantile(X_peaks[1].sum(dim=(1, 2)), 0.99) * 1.2
-	outlier_idxs = loci_counts > outlier_threshold
+	# Per-modality outlier filtering. The legacy code summed across
+	# every channel and the full length to get a single per-locus
+	# total, then dropped loci above 1.2x the 99th-percentile total.
+	# That collapses biologically distinct modalities into one number
+	# — a stranded TF with peaks two orders of magnitude higher than a
+	# co-trained ATAC track would dominate the threshold and skew the
+	# filter for both. Compute one threshold per signal group and OR
+	# the per-group outlier masks: a locus that's an outlier in *any*
+	# group is dropped. For the common single-group case this reduces
+	# exactly to the legacy behavior.
+	peak_signals = X_peaks[1]
+	outlier_idxs = torch.zeros(peak_signals.shape[0], dtype=torch.bool)
+	offset = 0
+	for g in (signal_groups if signal_groups else [peak_signals.shape[1]]):
+		group_counts = peak_signals[:, offset:offset+g].sum(dim=(1, 2))
+		group_threshold = torch.quantile(group_counts, 0.99) * 1.2
+		outlier_idxs |= group_counts > group_threshold
+		offset += g
 
 	X_bg = extract_loci(loci=negatives, sequences=sequences,
 		signals=signals, in_signals=controls, chroms=chroms, in_window=in_window,
@@ -363,7 +654,9 @@ def PeakGenerator(peaks, negatives, sequences, signals, controls=None,
 		max_jitter=max_jitter,
 		reverse_complement=reverse_complement,
 		shuffle=shuffle,
-		random_state=random_state
+		random_state=random_state,
+		signal_perm=signal_perm,
+		control_perm=control_perm,
 	)
 
 	X_gen = torch.utils.data.DataLoader(X_gen, pin_memory=pin_memory,

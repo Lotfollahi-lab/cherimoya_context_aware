@@ -1,7 +1,5 @@
 """Tests for the performance-measure utilities."""
 
-import math
-
 import numpy
 import pytest
 import torch
@@ -132,3 +130,88 @@ def test_calculate_performance_measures_subset_runs():
 	assert set(measures.keys()) == {'count_pearson', 'count_spearman', 'count_mse'}
 	for k, v in measures.items():
 		assert torch.isfinite(v).all(), k
+
+
+def test_calculate_performance_measures_per_group_count_target():
+	"""When signal_groups=[1, 2] and pred has 2 count outputs (one per
+	group), the true target for each group is the SUM of that group's
+	channels — not the total across all channels. So correlating
+	prediction-equals-truth-per-group should give a perfect (or
+	near-perfect) per-group Pearson."""
+
+	g = torch.Generator().manual_seed(0)
+	# 4 examples, 3 channels (1 unstranded + 1 stranded pair), length 8.
+	logits = torch.randn(4, 3, 8, generator=g)
+	true_counts = torch.randint(0, 7, (4, 3, 8), generator=g).float()
+
+	# Build a "perfect" per-group prediction.
+	per_channel = true_counts.sum(dim=-1)
+	per_group = torch.stack([
+		per_channel[:, 0],
+		per_channel[:, 1] + per_channel[:, 2],
+	], dim=-1)
+	perfect_pred = torch.log(per_group + 1)
+
+	measures = calculate_performance_measures(
+		logits, true_counts, perfect_pred,
+		measures=['count_pearson', 'count_mse'],
+		signal_groups=[1, 2],
+	)
+	# Perfect predictions: MSE per group is ~0, Pearson is ~1.
+	assert torch.allclose(measures['count_mse'], torch.zeros(2), atol=1e-5)
+	assert torch.allclose(measures['count_pearson'],
+		torch.ones(2), atol=1e-4)
+
+
+def test_calculate_performance_measures_legacy_total_when_no_groups():
+	"""When signal_groups=None and there are multiple count outputs, the
+	legacy code-path collapses across all channels into a single total
+	target. Documenting this fall-through here so the new code-path
+	doesn't silently change it."""
+
+	g = torch.Generator().manual_seed(0)
+	logits = torch.randn(4, 3, 8, generator=g)
+	true_counts = torch.randint(0, 7, (4, 3, 8), generator=g).float()
+
+	# A "perfect" prediction against the TOTAL count, repeated for every
+	# output head, must still produce Pearson == 1 in the legacy path.
+	total = true_counts.sum(dim=(-1, -2), keepdim=False).unsqueeze(-1)
+	pred = torch.log(total + 1).repeat(1, 3)
+
+	measures = calculate_performance_measures(
+		logits, true_counts, pred,
+		measures=['count_pearson', 'count_mse'],
+	)
+	assert torch.allclose(measures['count_mse'], torch.zeros(3), atol=1e-5)
+
+
+def test_calculate_performance_measures_signal_groups_sum_mismatch_raises():
+	"""sum(signal_groups) must equal true_counts.shape[1] when groups
+	are given and the prediction has one count per group. Otherwise the
+	caller has wired the modalities up wrong and we'd silently pool
+	channels into the wrong groups."""
+
+	logits = torch.randn(2, 3, 8)
+	true_counts = torch.randint(0, 5, (2, 3, 8)).float()
+	pred = torch.randn(2, 2)  # 2 group-count outputs
+
+	# signal_groups=[1, 1] sums to 2, but true_counts has 3 channels.
+	with pytest.raises(ValueError, match="sum.signal_groups"):
+		calculate_performance_measures(
+			logits, true_counts, pred,
+			measures=['count_pearson'], signal_groups=[1, 1])
+
+
+def test_calculate_performance_measures_validates_signal_groups():
+	"""The shared validator is invoked, so bad signal_groups (empty,
+	zero entry, etc.) fail with a clear error rather than silently
+	producing a degenerate target tensor."""
+
+	logits = torch.randn(2, 3, 8)
+	true_counts = torch.randint(0, 5, (2, 3, 8)).float()
+	pred = torch.randn(2, 3)
+
+	with pytest.raises(ValueError, match="positive ints"):
+		calculate_performance_measures(
+			logits, true_counts, pred,
+			measures=['count_pearson'], signal_groups=[0, 3])

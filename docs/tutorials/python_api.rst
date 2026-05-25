@@ -18,13 +18,24 @@ Creating a model
    model = Cherimoya(
        n_filters=96,              # backbone width
        n_layers=9,                # number of Cheri Blocks (dilations 1, 2, ..., 256)
-       n_outputs=2,               # number of profile output tracks (e.g. 2 for stranded)
+       signal_groups=[2],         # one stranded (+, -) group; see below
        n_control_tracks=0,        # number of control input tracks
        expansion=2,               # MLP expansion factor inside each Cheri Block
        residual_scale=0.15,       # fixed residual scale
-       single_count_output=True,  # single scalar count vs. one count per track
        name="my_model",           # used for save filenames
    ).cuda()
+
+``signal_groups`` is the list of channel counts per signal group, one
+group per biological modality. Examples:
+
+* ``[1]`` — single unstranded track (e.g. ATAC). Default.
+* ``[2]`` — one stranded ``(+, -)`` pair (e.g. BPNet-style ChIP).
+  Two profile channels but one shared count prediction; the two
+  strands swap places under reverse-complement augmentation.
+* ``[1, 2]`` — co-train an unstranded ATAC head with a stranded TF
+  head. Three profile channels, two count predictions. Groups are
+  independent under RC: only the inner ``(+, -)`` channels swap, the
+  ATAC channel stays put.
 
 The full constructor signature, including ``trimming`` and
 ``verbose``, is in :doc:`../api/model`.
@@ -49,12 +60,13 @@ Input/output shapes
      - Per-position control signal. Pass ``None`` when ``n_control_tracks
        == 0``.
    * - ``y_profile`` (output)
-     - ``(N, n_outputs, out_window)``
-     - Predicted profile logits. ``out_window`` is 1000 by default.
+     - ``(N, sum(signal_groups), out_window)``
+     - Predicted profile logits — one channel per signal channel.
+       ``out_window`` is 1000 by default.
    * - ``y_counts`` (output)
-     - ``(N, n_count_outputs)``
-     - Predicted log counts. ``n_count_outputs`` is 1 if
-       ``single_count_output`` else ``n_outputs``.
+     - ``(N, len(signal_groups))``
+     - Predicted log counts — one per signal *group*. A stranded
+       ``(+, -)`` group shares a single per-group count.
 
 By default ``trimming = 46 + sum(2**i for i in range(n_layers))``,
 which is 557 for the default 9-layer model and gives the 2114 → 1000
@@ -76,8 +88,8 @@ a ``torch.utils.data.DataLoader``:
        peaks="peaks.narrowPeak",
        negatives="negatives.bed",
        sequences="hg38.fa",
-       signals=["signal.+.bw", "signal.-.bw"],
-       controls=None,                       # or list of bigWigs
+       signals=[["signal.+.bw", "signal.-.bw"]],   # one stranded group
+       controls=None,                              # or list of bigWigs
        chroms=["chr2", "chr4", "chr5"],     # training chromosomes
        in_window=2114,
        out_window=1000,
@@ -283,6 +295,9 @@ counts, and predicted log counts, and returns a dict of tensors:
 
 If ``measures`` is ``None`` (the default), all built-in measures are
 computed. The full list and signature is in :doc:`../api/performance`.
+For multi-group models (see :doc:`../multi_task`), pass
+``signal_groups=model.signal_groups`` so the count metrics are
+computed per group rather than against a single total target.
 
 
 Interpreting the metrics

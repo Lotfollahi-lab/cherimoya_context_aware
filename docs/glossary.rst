@@ -26,6 +26,18 @@ Profile and counts
    is normalized into a probability distribution via softmax for the
    MNLL loss; the counts are predicted in log space.
 
+Signal group
+   A set of output channels that share an orientation and are treated
+   as one biological modality. An unstranded track (e.g. ATAC, DNase)
+   is a single-channel group; a stranded BPNet-style ``(+, -)`` pair
+   is a two-channel group. Each group emits one count prediction (so
+   the two strands of a pair share a single per-locus count) and its
+   channels swap among themselves under reverse-complement
+   augmentation while groups stay independent of one another. The
+   model's ``signal_groups=[1]`` default is a single unstranded
+   track; ``[2]`` is a stranded pair; ``[1, 2]`` is an unstranded
+   track co-trained with a stranded pair.
+
 Input window vs output window vs trimming
    The model receives a longer sequence (``in_window``, default 2114
    bp) than it predicts over (``out_window``, default 1000 bp). The

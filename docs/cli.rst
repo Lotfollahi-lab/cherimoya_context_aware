@@ -154,10 +154,18 @@ JSON schema (top-level keys, with defaults from
      - BED of negatives. If null, GC-matched negatives are sampled.
    * - ``signals``
      - ``null``
-     - List of signal files (BAM or bigWig). Required.
+     - Signal-track specification (BAM or bigWig files). Required.
+       Accepts either a flat list — in which case each entry is its
+       own one-channel (unstranded) group — or a structured list whose
+       entries are each a ``str`` (one-channel group) or a
+       ``list[str]`` (multi-channel group, e.g. a stranded
+       ``(+, -)`` pair). Example: ``["atac.bw",
+       ["ctcf.+.bw", "ctcf.-.bw"]]`` declares one unstranded ATAC group
+       and one stranded CTCF group. See the note in
+       ``cherimoya_cli/defaults.py`` for full semantics.
    * - ``controls``
      - ``null``
-     - Optional list of control files.
+     - Optional list of control files. Same grouping rule as ``signals``.
    * - ``skip``
      - ``false``
      - If ``true``, the whole pipeline is a no-op.
@@ -284,9 +292,6 @@ Unspecified keys fall back to the fit-level defaults.
    * - ``num_workers``
      - 1
      - Async prefetch workers for the data loader.
-   * - ``single_count_output``
-     - ``true``
-     - One scalar count per example vs. one per output track.
    * - ``early_stopping``
      - 15
      - Stop after N consecutive epochs with no validation count
@@ -538,10 +543,15 @@ JSON schema:
      - BED of evaluation loci.
    * - ``controls``
      - ``null``
-     - Optional list of control bigWigs (must match training).
+     - Optional list of control bigWigs (must match training). Same
+       grouping rule as ``signals`` below.
    * - ``signals``
      - ``null``
-     - Signal bigWigs (must match training, for computing metrics).
+     - Signal bigWigs to score against (must match training). Accepts
+       the same flat-or-grouped form as ``fit``'s ``signals``. The
+       per-group count pooling used to compute count metrics is
+       recovered from the loaded model's checkpoint, so passing the
+       structured form is recommended but not required.
    * - ``chroms``
      - ``["chr8", "chr20"]``
      - Held-out chromosomes.
@@ -562,12 +572,20 @@ JSON schema:
      - Optional regions to exclude.
    * - ``performance_filename``
      - ``"performance.tsv"``
-     - TSV with one row of summary metrics.
+     - TSV with one row per signal group.
 
-The TSV reports the mean of the following measures across examples:
+The TSV columns are
 ``profile_mnll``, ``profile_jsd``, ``profile_pearson``,
 ``profile_spearman``, ``count_pearson``, ``count_spearman``,
-``count_mse``.
+``count_mse``. The file has one data row per signal group, in
+``signal_groups`` order — for a single-group model (the default) this
+is a single row holding the same per-group mean that
+``calculate_performance_measures`` returns; for a multi-group model
+row ``i`` corresponds to ``signal_groups[i]``. Profile metrics are
+the mean of the metric over (validation loci × the group's
+channels); count metrics are read directly from the per-group
+``(n_groups,)`` tensors. See :doc:`multi_task` for an in-depth
+description.
 
 
 cherimoya attribute
@@ -673,3 +691,22 @@ Other list-valued fields (``loci``, ``negatives``, ``controls``) must
 be either ``null`` or a same-length list as the expanded
 ``signals``. Each job is written to ``{name}.pipeline.json`` and run
 via ``subprocess.run(["cherimoya", "pipeline", "-p", jname])``.
+
+.. note::
+
+   ``signals`` in a batch JSON is a *list of per-model signal
+   specs*: one entry per pipeline to run in parallel. With the new
+   grouped form each per-model entry is itself a flat-or-grouped
+   signals list. So a batch of two stranded BPNet models is::
+
+       "signals": [
+           [["expt1.+.bw", "expt1.-.bw"]],
+           [["expt2.+.bw", "expt2.-.bw"]]
+       ]
+
+   The outer list selects the model; each inner list is the
+   ``signals`` field of one pipeline JSON. Previously the
+   double-nesting was implicit (a flat two-element pair was a
+   stranded pair); under the grouped API a flat two-element list is
+   two *unstranded* tracks, so stranded batch jobs must use the
+   nested form above.

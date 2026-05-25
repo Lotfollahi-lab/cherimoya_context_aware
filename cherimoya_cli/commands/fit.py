@@ -26,7 +26,7 @@ def run(args):
 	from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 	from cherimoya import Cherimoya
-	from cherimoya.io import PeakGenerator
+	from cherimoya.io import PeakGenerator, normalize_signal_groups
 
 	from tangermeme.io import extract_loci
 
@@ -37,6 +37,19 @@ def run(args):
 	parameters = merge_parameters(args.parameters, default_fit_parameters)
 	if parameters['skip']:
 		sys.exit()
+
+	# Resolve grouped/flat signal specs into a flat list of files plus
+	# the per-group sizes. The flat list is what extract_loci and the
+	# `bam2bw`-style tooling need; the group sizes determine the
+	# channel permutation used under RC and the number of count
+	# predictions. We deliberately do NOT mutate ``parameters['signals']``
+	# here — the structured form (e.g. ``[[plus.bw, minus.bw]]``) is what
+	# the downstream evaluate JSON needs to re-parse the grouping
+	# correctly. Mutating to the flat form here would silently
+	# re-interpret a stranded pair as two unstranded channels in the
+	# evaluate step.
+	signal_files, signal_groups = normalize_signal_groups(parameters['signals'])
+	control_files, control_groups = normalize_signal_groups(parameters['controls'])
 
 	if parameters['verbose']:
 		print("Training Chroms: ", parameters['training_chroms'])
@@ -70,13 +83,15 @@ def run(args):
 		random_state=parameters['random_state'],
 		batch_size=parameters['batch_size'],
 		num_workers=parameters['num_workers'],
-		verbose=parameters['verbose']
+		verbose=parameters['verbose'],
+		signal_groups=signal_groups,
+		control_groups=control_groups,
 	)
 
 	valid_data = extract_loci(
 		sequences=parameters['sequences'],
-		signals=parameters['signals'],
-		in_signals=parameters['controls'],
+		signals=signal_files,
+		in_signals=control_files,
 		loci=parameters['loci'],
 		chroms=parameters['validation_chroms'],
 		in_window=parameters['in_window'],
@@ -99,9 +114,9 @@ def run(args):
 
 	###
 
-	if parameters['controls'] is not None:
+	if control_files is not None:
 		valid_sequences, valid_signals, valid_controls = valid_data
-		n_control_tracks = len(parameters['controls'])
+		n_control_tracks = len(control_files)
 	else:
 		valid_sequences, valid_signals = valid_data
 		valid_controls = None
@@ -112,11 +127,10 @@ def run(args):
 	model = Cherimoya(
 		n_filters=parameters['n_filters'],
 		n_layers=parameters['n_layers'],
-		n_outputs=len(parameters['signals']),
+		signal_groups=signal_groups,
 		n_control_tracks=n_control_tracks,
 		expansion=parameters['expansion'],
 		residual_scale=parameters['residual_scale'],
-		single_count_output=parameters['single_count_output'],
 		trimming=trimming,
 		name=parameters['name'],
 		verbose=parameters['verbose']

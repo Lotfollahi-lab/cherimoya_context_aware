@@ -62,7 +62,8 @@ Steps invoked, in order:
    ``ctcf.control.-.bw``).
 3. GC-matched negative sampling (``ctcf.negatives.bed``).
 4. Train a 9-layer 96-filter Cherimoya model with
-   ``n_outputs=2`` (the two strands) and ``n_control_tracks=2``.
+   ``signal_groups=[2]`` (one stranded ``(+, -)`` group) and
+   ``n_control_tracks=2``.
 5. Compute count attributions via saturation mutagenesis on the
    validation chromosomes.
 6. Call seqlets, annotate with tomtom-lite against

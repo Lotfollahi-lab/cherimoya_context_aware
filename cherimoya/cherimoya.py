@@ -12,6 +12,7 @@ import numpy
 import torch
 
 from .cheri import CheriBlock
+from .io import _validate_signal_groups
 from .losses import _mixture_loss
 from .performance import calculate_performance_measures
 
@@ -106,12 +107,20 @@ class Cherimoya(torch.nn.Module):
 		Number of stacked Cheri Blocks. Block ``i`` uses dilation
 		``2**i``. Default is 9.
 
-	n_outputs: int, optional
-		Number of output tracks for the profile head. Default is 1.
+	signal_groups: list of int, optional
+		The number of channels in each signal group. A signal group is
+		one biological modality whose channels share an orientation: a
+		single-channel (unstranded) track is a group of size 1, a
+		stranded ``(+, -)`` pair is a group of size 2. The profile head
+		emits one channel per signal channel (total
+		``sum(signal_groups)`` outputs); the count head emits one
+		prediction per *group* (total ``len(signal_groups)``). Default
+		is ``[1]`` — a single unstranded track.
 
 	n_control_tracks: int, optional
-		Number of control input tracks. If 0, the model takes only the
-		one-hot sequence as input. Default is 0.
+		Number of control input tracks (the total channel count
+		summed across all control groups, if any). If 0, the model
+		takes only the one-hot sequence as input. Default is 0.
 
 	expansion: int, optional
 		Channel-expansion factor for the MLP inside each Cheri Block. The
@@ -131,27 +140,31 @@ class Cherimoya(torch.nn.Module):
 		producing the output profile. If None, defaults to
 		``46 + sum(2**i for i in range(n_layers))``.
 
-	single_count_output: bool, optional
-		If True, the count head returns a single scalar per example;
-		otherwise it returns one count per output track. Default is True.
-
 	verbose: bool, optional
 		Whether the training-progress logger prints to stdout. Default
 		is True.
 	"""
 
-	def __init__(self, n_filters=96, n_layers=9, n_outputs=1,
+	def __init__(self, n_filters=96, n_layers=9, signal_groups=None,
 		n_control_tracks=0, expansion=2, residual_scale=0.15, name=None,
-		trimming=None, single_count_output=True, verbose=True,
-		compile=True, compile_mode='max-autotune'):
+		trimming=None, verbose=True, compile=True,
+		compile_mode='max-autotune'):
 		super(Cherimoya, self).__init__()
+
+		if signal_groups is None:
+			signal_groups = [1]
+		signal_groups = list(signal_groups)
+		_validate_signal_groups(signal_groups)
+
+		self.signal_groups = signal_groups
+		self.n_outputs = sum(signal_groups)
+		self.n_groups = len(signal_groups)
+
 		self.n_filters = n_filters
 		self.n_layers = n_layers
-		self.n_outputs = n_outputs
 		self.n_control_tracks = n_control_tracks
 		self.expansion = expansion
 		self.residual_scale = residual_scale
-		self.single_count_output = single_count_output
 
 		self.name = name or "cherimoya.{}.{}".format(n_filters, n_layers)
 		self.trimming = trimming if trimming is not None else (
@@ -166,15 +179,14 @@ class Cherimoya(torch.nn.Module):
 			for i in range(self.n_layers)
 		])
 
-		self.fconv = torch.nn.Conv1d(n_filters+n_control_tracks, n_outputs,
-			kernel_size=1, padding=0)
+		self.fconv = torch.nn.Conv1d(n_filters+n_control_tracks,
+			self.n_outputs, kernel_size=1, padding=0)
 
 		n_count_control = 1 if n_control_tracks > 0 else 0
-		n_count_outputs = 1 if single_count_output else n_outputs
-		self.linear = torch.nn.Linear(n_filters+n_count_control, n_count_outputs)
+		self.linear = torch.nn.Linear(n_filters+n_count_control, self.n_groups)
 
-		self.lw0 = torch.nn.Parameter(torch.ones(n_outputs))
-		self.lw1 = torch.nn.Parameter(torch.ones(n_count_outputs))
+		self.lw0 = torch.nn.Parameter(torch.ones(self.n_groups))
+		self.lw1 = torch.nn.Parameter(torch.ones(self.n_groups))
 
 		torch.nn.init.trunc_normal_(self.iconv.weight, std=0.02)
 		torch.nn.init.trunc_normal_(self.fconv.weight, std=0.02)
@@ -184,11 +196,26 @@ class Cherimoya(torch.nn.Module):
 		torch.nn.init.zeros_(self.fconv.bias)
 		torch.nn.init.zeros_(self.linear.bias)
 
-		self.logger = Logger(["Epoch", "Iteration", "Training Time",
+		summary_columns = ["Epoch", "Iteration", "Training Time",
 			"Validation Time", "Training MNLL", "Training Count MSE",
 			"Validation MNLL", "Validation Profile Pearson",
-			"Validation Count Pearson", "Validation Count MSE", "Saved?"],
-			verbose=verbose)
+			"Validation Count Pearson", "Validation Count MSE", "Saved?"]
+		self.logger = Logger(summary_columns, verbose=verbose)
+
+		# Detail logger: same columns as the summary plus one
+		# ProfilePearson_g{i} and one CountPearson_g{i} per signal
+		# group, so multi-modal runs can be analyzed per-modality
+		# offline. Stays out of stdout — at hundreds of groups the
+		# detail rows would blow out the terminal — and lands at
+		# `{name}.detailed.log` on disk in parallel with the summary
+		# `{name}.log`.
+		per_group_columns = []
+		for i in range(self.n_groups):
+			per_group_columns.append("ProfilePearson_g{}".format(i))
+		for i in range(self.n_groups):
+			per_group_columns.append("CountPearson_g{}".format(i))
+		self.detail_logger = Logger(summary_columns + per_group_columns,
+			verbose=False)
 
 		# After load_state_dict completes (and the full recursion has
 		# updated every nested CheriBlock's Linear weights), refresh
@@ -221,13 +248,12 @@ class Cherimoya(torch.nn.Module):
 		return {
 			'n_filters': self.n_filters,
 			'n_layers': self.n_layers,
-			'n_outputs': self.n_outputs,
+			'signal_groups': list(self.signal_groups),
 			'n_control_tracks': self.n_control_tracks,
 			'expansion': self.expansion,
 			'residual_scale': self.residual_scale,
 			'name': self.name,
 			'trimming': self.trimming,
-			'single_count_output': self.single_count_output,
 			'verbose': False,
 		}
 
@@ -291,10 +317,10 @@ class Cherimoya(torch.nn.Module):
 		"""
 
 		payload = torch.load(path, map_location=device, weights_only=True)
-		# Old checkpoints (saved before the compile kwargs existed) won't have
-		# `compile` or `compile_mode` in their config, so the defaults apply.
-		# Newer checkpoints also won't, because `_init_kwargs` intentionally
-		# excludes both.
+		# The compile / compile_mode kwargs are runtime knobs that
+		# `_init_kwargs` intentionally excludes from the saved config,
+		# so they're always supplied here rather than read from the
+		# checkpoint.
 		model = cls(**payload['config'], compile=compile,
 			compile_mode=compile_mode)
 		model.load_state_dict(payload['state_dict'])
@@ -326,15 +352,20 @@ class Cherimoya(torch.nn.Module):
 		X: torch.tensor, shape=(batch_size, 4, length)
 			The one-hot encoded batch of sequences.
 
-		X_ctl: torch.tensor or None, shape=(batch_size, n_strands, length)
+		X_ctl: torch.tensor or None, shape=(batch_size, n_control_tracks, length)
 			A value representing the signal of the control at each position in
 			the sequence. If no controls, pass in None. Default is None.
 
 		Returns
 		-------
-		y_profile: torch.tensor, shape=(batch_size, n_strands, out_length)
-			The output predictions for each strand trimmed to the output
-			length.
+		y_profile: torch.tensor, shape=(batch_size, sum(signal_groups), out_length)
+			Per-channel profile logits trimmed to the output length —
+			one channel per signal channel across all groups.
+
+		y_counts: torch.tensor, shape=(batch_size, len(signal_groups))
+			Per-group log-count predictions — one prediction per signal
+			group, so a stranded ``(+, -)`` pair contributes a single
+			shared count.
 		"""
 
 		start, end = self.trimming, X.shape[2] - self.trimming
@@ -412,7 +443,7 @@ class Cherimoya(torch.nn.Module):
 			predictions at the end of each epoch. If n_control_tracks is None, pass in
 			None. Default is None.
 
-		y_valid: torch.tensor or None, shape=(n, n_outputs, output_length)
+		y_valid: torch.tensor or None, shape=(n, sum(signal_groups), output_length)
 			A block of signals to validate against at the end of each epochs.
 
 		max_epochs: int
@@ -449,6 +480,7 @@ class Cherimoya(torch.nn.Module):
 		early_stop_count = 0
 		best_corr = float("-inf")
 		self.logger.start()
+		self.detail_logger.start()
 
 		ema = EMA(self, decay=0.999)
 
@@ -476,8 +508,9 @@ class Cherimoya(torch.nn.Module):
 				with torch.autocast(device_type=device, dtype=dtype):
 					y_hat_logits, y_hat_logcounts = self(X, X_ctl)
 
-				profile_loss, count_loss = _mixture_loss(y, y_hat_logits.float(),
-					y_hat_logcounts.float())
+				profile_loss, count_loss = _mixture_loss(y,
+					y_hat_logits.float(), y_hat_logcounts.float(),
+					signal_groups=self.signal_groups)
 
 
 				w0 = (1.0 / (2.0 * self.lw0 ** 2))
@@ -517,28 +550,52 @@ class Cherimoya(torch.nn.Module):
 					batch_size=batch_size, dtype=dtype, device=device)
 
 				valid_profile_loss, valid_count_loss = _mixture_loss(y_valid,
-					y_hat_logits, y_hat_logcounts)
+					y_hat_logits, y_hat_logcounts,
+					signal_groups=self.signal_groups)
 
 				measures = calculate_performance_measures(y_hat_logits,
-					y_valid, y_hat_logcounts, measures=['profile_pearson', 'count_pearson'])
+					y_valid, y_hat_logcounts,
+					measures=['profile_pearson', 'count_pearson'],
+					signal_groups=self.signal_groups)
 
 				valid_profile_corr = numpy.nan_to_num(measures['profile_pearson'])
-				valid_count_corr = numpy.nan_to_num(measures['count_pearson']).mean()
+				valid_count_per_group = numpy.nan_to_num(measures['count_pearson'])
+				valid_count_corr = valid_count_per_group.mean()
 				valid_time = time.time() - tic
 
-				self.logger.add([epoch,
+				# Per-group profile Pearson. The raw
+				# `measures['profile_pearson']` is shape
+				# (n_loci, sum(signal_groups)); for each group, average
+				# over its channels and the locus dim so each modality
+				# contributes one number, matching how the loss is
+				# pooled and how the count Pearson is reported.
+				per_group_profile_corr = []
+				offset = 0
+				for g in self.signal_groups:
+					chunk = valid_profile_corr[:, offset:offset+g]
+					per_group_profile_corr.append(float(chunk.mean()))
+					offset += g
+				valid_profile_corr_mean = float(numpy.mean(
+					per_group_profile_corr))
+
+				summary_row = [epoch,
 					iteration,
 					train_time,
 					valid_time,
 					profile_loss.mean().item(),
 					count_loss.mean().item(),
 					valid_profile_loss.mean().item(),
-					valid_profile_corr.mean(),
+					valid_profile_corr_mean,
 					valid_count_corr,
 					valid_count_loss.mean().item(),
-					(valid_count_corr > best_corr).item()])
+					(valid_count_corr > best_corr).item()]
+				self.logger.add(summary_row)
+				self.detail_logger.add(summary_row
+					+ per_group_profile_corr
+					+ [float(v) for v in valid_count_per_group.tolist()])
 
 				self.logger.save("{}.log".format(self.name))
+				self.detail_logger.save("{}.detailed.log".format(self.name))
 
 				if valid_count_corr > best_corr:
 					self.save("{}.torch".format(self.name))
