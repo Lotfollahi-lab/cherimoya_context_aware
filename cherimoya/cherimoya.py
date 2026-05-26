@@ -393,9 +393,10 @@ class Cherimoya(torch.nn.Module):
 		y_counts = self.linear(X)
 		return y_profile, y_counts
 
-	def fit(self, training_data, muon_optimizer, adam_optimizer, muon_scheduler,
-		adam_scheduler, X_valid, X_ctl_valid, y_valid, max_epochs=50, batch_size=64,
-		dtype='float32', device='cuda', early_stopping=None):
+	def fit(self, training_data, muon_optimizer, adam_optimizer, lw_optimizer,
+		muon_scheduler, adam_scheduler, lw_scheduler, X_valid, X_ctl_valid,
+		y_valid, max_epochs=50, batch_size=64, dtype='float32', device='cuda',
+		early_stopping=None):
 		"""Fit the model to data and validate it periodically.
 
 		This method controls the training of a Cherimoya model. It will fit
@@ -424,8 +425,13 @@ class Cherimoya(torch.nn.Module):
 
 		adam_optimizer: torch.optim.Optimizer
 			An Adam/W optimizer to control the training of the other parametrers. This
-			should be the head/tail layers, the bias terms, and any other parameters
-			that are not 2D matrices.
+			should be the head/tail layers, the bias terms, the per-block
+			``conv_weight`` parameter, and any other parameters that are not 2D
+			matrices routed to Muon.
+
+		lw_optimizer: torch.optim.Optimizer
+			An optimizer for the Kendall uncertainty weights (``lw0``,
+			``lw1``). Typically SGD with momentum.
 
 		muon_scheduler: torch.optim.lr_scheduler
 			The scheduler to use for the Muon optimizer. This should likely be a cosine
@@ -434,6 +440,10 @@ class Cherimoya(torch.nn.Module):
 		adam_scheduler: torch.optim.lr_scheduler
 			The scheduler to use for the Adam/W optimizer. This should likely be the
 			same cosine decay with a warmup phase used for the Muon optimizer.
+
+		lw_scheduler: torch.optim.lr_scheduler
+			The scheduler to use for the ``lw`` optimizer. Typically a
+			linear warmup followed by a constant rate (no decay).
 
 		X_valid: torch.tensor, shape=(n, 4, length)
 			A block of sequences to validate on at the end of each epoch.
@@ -502,6 +512,7 @@ class Cherimoya(torch.nn.Module):
 				# Clear the optimizer and set the model to training mode
 				muon_optimizer.zero_grad()
 				adam_optimizer.zero_grad()
+				lw_optimizer.zero_grad()
 				self.train()
 
 				# Make one training step
@@ -525,9 +536,11 @@ class Cherimoya(torch.nn.Module):
 
 				muon_optimizer.step()
 				adam_optimizer.step()
+				lw_optimizer.step()
 
 				muon_scheduler.step()
 				adam_scheduler.step()
+				lw_scheduler.step()
 
 				ema.update(self)
 

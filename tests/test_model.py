@@ -232,18 +232,25 @@ def test_grouped_model_fit_smoke(tmp_path):
 	training_data = torch.utils.data.DataLoader(sampler, batch_size=4,
 		num_workers=0)
 
-	# Optimizers — split params the same way fit.py does so 2D weights
-	# go to Muon and everything else to AdamW.
-	muon_params, adam_params = [], []
+	# Optimizers — split params the same way fit.py does: 2D projection
+	# weights to Muon, Kendall lw0/lw1 to SGD, everything else (incl.
+	# conv_weight and the head) to AdamW.
+	muon_params, adam_params, lw_params = [], [], []
 	for name, p in model.named_parameters():
-		if p.ndim == 2 and "weight" in name and name != "linear.weight":
+		if name in ("lw0", "lw1"):
+			lw_params.append(p)
+		elif (p.ndim == 2 and "weight" in name and name != "linear.weight"
+				and "conv_weight" not in name):
 			muon_params.append(p)
 		else:
 			adam_params.append(p)
 	muon_opt = Muon(muon_params, lr=1e-3, weight_decay=0.0)
 	adam_opt = torch.optim.AdamW(adam_params, lr=1e-3, weight_decay=0.0)
+	lw_opt = torch.optim.SGD(lw_params, lr=1e-3, weight_decay=0.0,
+		momentum=0.9)
 	muon_sched = LinearLR(muon_opt, start_factor=1.0, total_iters=1)
 	adam_sched = LinearLR(adam_opt, start_factor=1.0, total_iters=1)
+	lw_sched = LinearLR(lw_opt, start_factor=1.0, total_iters=1)
 
 	# Validation tensors with the same shape contract.
 	X_valid = torch.zeros(4, 4, L)
@@ -254,8 +261,8 @@ def test_grouped_model_fit_smoke(tmp_path):
 	cwd = os.getcwd()
 	os.chdir(tmp_path)
 	try:
-		best = model.fit(training_data, muon_opt, adam_opt,
-			muon_sched, adam_sched,
+		best = model.fit(training_data, muon_opt, adam_opt, lw_opt,
+			muon_sched, adam_sched, lw_sched,
 			X_valid=X_valid, X_ctl_valid=None, y_valid=y_valid,
 			max_epochs=2, batch_size=4, dtype='float32',
 			device='cpu', early_stopping=None)

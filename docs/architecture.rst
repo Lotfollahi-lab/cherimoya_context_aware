@@ -165,12 +165,17 @@ To swap the block for a different module, subclass and replace the
 The forward pass calls each block as ``X = self.blocks[i](X)`` with
 ``X`` in channels-last layout ``(N, L, C)``. The block must accept
 and return the same shape. The rest of the model (input stem, profile
-head, count head, EMA, dual-optimizer routing) is unchanged.
+head, count head, EMA, three-way optimizer routing) is unchanged.
 
-The dual-optimizer routing rule (``ndim == 2 and "weight" in name and
-name != "linear.weight"``) is shape-based, not name-based, so any 2D
-weight inside a custom block will go to Muon automatically. Override
-this in your own training script if you want different routing.
+The Muon routing rule is shape-based but name-aware: a parameter goes
+to Muon iff ``ndim == 2 and "weight" in name and name != "linear.weight"
+and "conv_weight" not in name``. The name-based exclusions peel off
+the count head and the per-block ``conv_weight`` (the latter lives on
+the depth-wise dilated path, not a projection matmul, so AdamW handles
+it). Separately, ``lw0`` and ``lw1`` are routed to SGD by exact name
+match. Any 2D projection weight inside a custom block will go to Muon
+automatically. Override this in your own training script if you want
+different routing.
 
 
 Loss design
@@ -239,15 +244,21 @@ Default learning rates and weight decays:
      - Weight decay
    * - Muon
      - 0.025
-     - 0.01
+     - 0.03
    * - AdamW
-     - 0.004
-     - 0.2
+     - 0.001
+     - 0.0
+   * - SGD (lw)
+     - 0.001
+     - 0.0
 
-**Schedule.** Both optimizers use a ``LinearLR`` warmup of 5 epochs
-(starting from 1% of the target LR) followed by a ``CosineAnnealingLR``
-decay over the remaining ``max_epochs - 5`` epochs down to ``1e-5``,
-chained with ``SequentialLR``.
+**Schedule.** Muon and AdamW use a ``LinearLR`` warmup of
+``n_warmup_epochs`` epochs (starting from 1% of the target LR)
+followed by a ``CosineAnnealingLR`` decay over the remaining
+``max_epochs - n_warmup_epochs`` epochs down to ``1e-5``, chained
+with ``SequentialLR``. The SGD optimizer over ``lw0`` / ``lw1`` uses
+the same warmup but then holds at a constant rate for the rest of
+training rather than decaying.
 
 **EMA at evaluation.** During training the model maintains an
 :class:`~cherimoya.cherimoya.EMA` shadow of every floating-point
@@ -293,9 +304,10 @@ A handful of choices keep deep stacks well-behaved during training:
 * **No biases** inside Cheri Blocks (conv, ``linear1``, ``linear2``).
   Bias is only used in the input/output convolutions and the count
   head.
-* **No weight decay** on Muon-routed weights at the level of the
+* **Low weight decay** on Muon-routed weights at the level of the
   optimizer's effective update (Muon uses orthogonalization, which is
-  scale-invariant; ``muon_wd=0.01`` is a small safety margin).
-* **5-epoch warmup** from 1% of the target LR before cosine decay.
+  scale-invariant; ``muon_wd=0.03`` is a small safety margin).
+* **Linear warmup** from 1% of the target LR over ``n_warmup_epochs``
+  epochs (default 2) before cosine decay.
 * **fp32 norm statistics** in the layer-norm step, even when the rest
   of the forward runs in bf16.

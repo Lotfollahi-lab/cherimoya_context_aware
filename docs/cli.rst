@@ -278,22 +278,36 @@ Unspecified keys fall back to the fit-level defaults.
      - 0.025
      - Muon learning rate.
    * - ``muon_wd``
-     - 0.01
+     - 0.03
      - Muon weight decay.
    * - ``adam_lr``
-     - 0.004
+     - 0.001
      - AdamW learning rate.
    * - ``adam_wd``
-     - 0.2
+     - 0.0
      - AdamW weight decay.
+   * - ``lw_lr``
+     - 0.001
+     - SGD learning rate for the Kendall uncertainty weights
+       (``lw0``, ``lw1``).
+   * - ``lw_wd``
+     - 0.0
+     - SGD weight decay for the Kendall uncertainty weights.
+   * - ``lw_momentum``
+     - 0.9
+     - SGD momentum for the Kendall uncertainty weights.
+   * - ``n_warmup_epochs``
+     - 2
+     - Number of epochs over which the LR is linearly warmed up from
+       1% of its target before cosine decay begins.
    * - ``negative_ratio``
-     - 0.1
+     - 0.02
      - Negatives per peak per epoch.
    * - ``num_workers``
      - 1
      - Async prefetch workers for the data loader.
    * - ``early_stopping``
-     - 15
+     - 5
      - Stop after N consecutive epochs with no validation count
        Pearson improvement.
    * - ``max_jitter``
@@ -306,7 +320,7 @@ Unspecified keys fall back to the fit-level defaults.
      - ``false``
      - Evaluation-time RC averaging.
    * - ``max_epochs``
-     - 50
+     - 20
      - Maximum training epochs.
    * - ``training_chroms``
      - hg38 default (chr2, chr4, chr5, chr7, chr9-22, chrX, chrY)

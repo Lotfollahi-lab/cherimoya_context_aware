@@ -72,9 +72,9 @@ Design highlights
 * **Three forward paths, one set of weights**. A CPU fallback, a
   Triton fwd+bwd kernel for training, and a fwd-only megakernel for
   inference, all numerically equivalent up to ~1e-5 max-abs.
-* **Dual-optimizer training**. Muon for 2D projection weights, AdamW
-  for everything else, with hyperparameters tuned via large-scale
-  sweeps.
+* **Three-optimizer training**. Muon for 2D projection weights, SGD
+  for the Kendall uncertainty weights, AdamW for everything else,
+  with hyperparameters tuned via large-scale sweeps.
 * **Learned loss balancing**. Kendall-Gal uncertainty weighting with
   one learnable weight per output track replaces a fixed
   profile/counts loss weight.
@@ -83,7 +83,7 @@ Design highlights
   smoothing both the validation curve and the final predictions.
 * **Stability-first defaults**. Small fixed residual scale at
   initialization, no biases inside Cheri Blocks, no weight decay on
-  Muon-routed weights, and a 5-epoch warmup before cosine decay.
+  Muon-routed weights, and a 2-epoch warmup before cosine decay.
 
 See :doc:`architecture` for the full story and :doc:`benchmarks` for
 measured numbers.

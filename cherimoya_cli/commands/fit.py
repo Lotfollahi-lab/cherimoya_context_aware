@@ -23,7 +23,8 @@ def run(args):
 	torch.set_float32_matmul_precision('high')
 
 	from torch.optim import Muon
-	from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+	from torch.optim.lr_scheduler import (LinearLR, CosineAnnealingLR,
+		ConstantLR, SequentialLR)
 
 	from cherimoya import Cherimoya
 	from cherimoya.io import PeakGenerator, normalize_signal_groups
@@ -144,15 +145,23 @@ def run(args):
 			sum(p.numel() for p in model.parameters() if p.requires_grad))
 		)
 
-	num_warmup_epochs = 5
+	n_warmup_epochs = parameters['n_warmup_epochs']
 	max_epochs = parameters['max_epochs']
-	num_warmup_iters = len(training_data) * num_warmup_epochs
-	num_decay_iters = len(training_data) * max(1, max_epochs - num_warmup_epochs)
+	num_warmup_iters = len(training_data) * n_warmup_epochs
+	num_decay_iters = len(training_data) * max(1, max_epochs - n_warmup_epochs)
 
+	# Muon takes 2D projection weights inside Cheri Blocks
+	# (linear1/linear2.weight). ``conv_weight`` is 2D but lives on the
+	# depth-wise dilated path, not a projection matmul, and is routed to
+	# AdamW. ``lw0`` / ``lw1`` are routed by exact name to SGD.
 	muon_params = []
 	adam_params = []
+	lw_params = []
 	for name, p in model.named_parameters():
-		if p.ndim == 2 and "weight" in name and name != "linear.weight":
+		if name in ("lw0", "lw1"):
+			lw_params.append(p)
+		elif (p.ndim == 2 and "weight" in name and name != "linear.weight"
+				and "conv_weight" not in name):
 			muon_params.append(p)
 		else:
 			adam_params.append(p)
@@ -188,19 +197,41 @@ def run(args):
 		milestones=[num_warmup_iters]
 	)
 
+	# lw_optimizer holds only lw0/lw1. ``ConstantLR(factor=1.0)`` after
+	# the warmup phase keeps the lr flat for the rest of training — we
+	# deliberately do not cosine-decay the Kendall loss-balancing weights.
+	lw_optimizer = torch.optim.SGD(
+		lw_params,
+		lr=parameters['lw_lr'],
+		weight_decay=parameters['lw_wd'],
+		momentum=parameters['lw_momentum']
+	)
+	lw_warmup_scheduler = LinearLR(lw_optimizer, start_factor=0.01,
+		total_iters=num_warmup_iters)
+	lw_constant_scheduler = ConstantLR(lw_optimizer, factor=1.0,
+		total_iters=1)
+	lw_scheduler = SequentialLR(
+		lw_optimizer,
+		schedulers=[lw_warmup_scheduler, lw_constant_scheduler],
+		milestones=[num_warmup_iters]
+	)
+
 	if parameters['verbose']:
-		print("Muon Optimizer: lr={}, wd={}".format(parameters['muon_lr'], 
+		print("Muon Optimizer: lr={}, wd={}".format(parameters['muon_lr'],
 													parameters['muon_wd']))
-		print("AdamW Optimizer: lr={}, wd={}\n".format(parameters['adam_lr'],
+		print("AdamW Optimizer: lr={}, wd={}".format(parameters['adam_lr'],
 													 parameters['adam_wd']))
+		print("SGD Optimizer (lw): lr={}, wd={}, momentum={}\n".format(
+			parameters['lw_lr'], parameters['lw_wd'],
+			parameters['lw_momentum']))
 		  
 	###
 
 	
 
 	model.fit(training_data,
-		muon_optimizer, adam_optimizer,
-		muon_scheduler, adam_scheduler,
+		muon_optimizer, adam_optimizer, lw_optimizer,
+		muon_scheduler, adam_scheduler, lw_scheduler,
 		X_valid=valid_sequences,
 		X_ctl_valid=valid_controls,
 		y_valid=valid_signals,

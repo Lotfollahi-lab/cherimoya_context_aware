@@ -94,7 +94,7 @@ a ``torch.utils.data.DataLoader``:
        in_window=2114,
        out_window=1000,
        max_jitter=50,                       # peak-center jitter at training time
-       negative_ratio=0.1,                  # n_negatives per n_peaks per epoch
+       negative_ratio=0.02,                 # n_negatives per n_peaks per epoch
        reverse_complement=True,             # augment with reverse complements
        batch_size=64,
        num_workers=1,                       # async prefetch workers
@@ -153,34 +153,42 @@ Validation data is loaded as a single block of tensors using
 Optimizers and schedulers
 -------------------------
 
-Cherimoya uses a dual-optimizer strategy: Muon for 2D projection
-weights in the Cheri Blocks, AdamW for everything else. To match the
-CLI defaults exactly:
+Cherimoya uses a three-optimizer strategy: Muon for the 2D projection
+weights in the Cheri Blocks, AdamW for the head/tail layers, biases,
+and the per-block ``conv_weight``, and SGD for the Kendall uncertainty
+weights ``lw0`` / ``lw1``. To match the CLI defaults exactly:
 
 .. code-block:: python
 
-   from torch.optim import AdamW, Muon
-   from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+   from torch.optim import AdamW, Muon, SGD
+   from torch.optim.lr_scheduler import (LinearLR, CosineAnnealingLR,
+       ConstantLR, SequentialLR)
 
-   # Route parameters. Muon takes the 2D weights inside Cheri Blocks
-   # (linear1.weight and linear2.weight); AdamW takes everything else,
-   # including the count-head linear layer (name == "linear.weight").
-   muon_params, adam_params = [], []
+   # Route parameters into three buckets. Muon takes the 2D projection
+   # weights inside Cheri Blocks (linear1.weight, linear2.weight); SGD
+   # takes lw0/lw1; AdamW takes everything else, including the count
+   # head (name == "linear.weight") and the per-block ``conv_weight``.
+   muon_params, adam_params, lw_params = [], [], []
    for name, p in model.named_parameters():
-       if p.ndim == 2 and "weight" in name and name != "linear.weight":
+       if name in ("lw0", "lw1"):
+           lw_params.append(p)
+       elif (p.ndim == 2 and "weight" in name and name != "linear.weight"
+               and "conv_weight" not in name):
            muon_params.append(p)
        else:
            adam_params.append(p)
 
-   muon_optimizer = Muon(muon_params, lr=0.025, weight_decay=0.01)
-   adam_optimizer = AdamW(adam_params, lr=0.004, weight_decay=0.2)
+   muon_optimizer = Muon(muon_params, lr=0.025, weight_decay=0.03)
+   adam_optimizer = AdamW(adam_params, lr=0.001, weight_decay=0.0)
+   lw_optimizer = SGD(lw_params, lr=0.001, weight_decay=0.0, momentum=0.9)
 
-   # Warmup for 5 epochs, then cosine decay for the rest of training
-   # down to eta_min=1e-5. Note T_max uses (max_epochs - 5), not max_epochs.
-   max_epochs = 50
-   num_warmup_epochs = 5
-   num_warmup_iters = len(training_data) * num_warmup_epochs
-   num_decay_iters = len(training_data) * max(1, max_epochs - num_warmup_epochs)
+   # Warmup for 2 epochs, then cosine decay for the rest of training
+   # down to eta_min=1e-5. Note T_max uses (max_epochs - n_warmup_epochs),
+   # not max_epochs.
+   max_epochs = 20
+   n_warmup_epochs = 2
+   num_warmup_iters = len(training_data) * n_warmup_epochs
+   num_decay_iters = len(training_data) * max(1, max_epochs - n_warmup_epochs)
 
    def make_scheduler(opt):
        warm = LinearLR(opt, start_factor=0.01, total_iters=num_warmup_iters)
@@ -190,6 +198,13 @@ CLI defaults exactly:
    muon_scheduler = make_scheduler(muon_optimizer)
    adam_scheduler = make_scheduler(adam_optimizer)
 
+   # lw schedule is warmup then flat — the Kendall weights are not
+   # cosine-decayed.
+   lw_warm = LinearLR(lw_optimizer, start_factor=0.01, total_iters=num_warmup_iters)
+   lw_const = ConstantLR(lw_optimizer, factor=1.0, total_iters=1)
+   lw_scheduler = SequentialLR(lw_optimizer,
+       schedulers=[lw_warm, lw_const], milestones=[num_warmup_iters])
+
 
 Training
 --------
@@ -198,14 +213,14 @@ Training
 
    model.fit(
        training_data,
-       muon_optimizer, adam_optimizer,
-       muon_scheduler, adam_scheduler,
+       muon_optimizer, adam_optimizer, lw_optimizer,
+       muon_scheduler, adam_scheduler, lw_scheduler,
        X_valid=X_valid,
        X_ctl_valid=None,            # pass control tensors here if using controls
        y_valid=y_valid,
-       max_epochs=50,
+       max_epochs=20,
        batch_size=64,
-       early_stopping=15,           # stop after 15 epochs without count-Pearson gain
+       early_stopping=5,            # stop after 5 epochs without count-Pearson gain
        dtype='float32',             # or 'bfloat16' for mixed precision via autocast
        device='cuda',
    )
