@@ -16,6 +16,8 @@ Inputs
 * A motif database in MEME format.
 * Optional: a BED of peak coordinates. If not provided, MACS3 will
   call peaks.
+* Optional: a BED of negative coordinates. If not provided, we will
+  automatically identify GC-matched negatives.
 
 
 About the +4 / −4 shift
@@ -23,11 +25,11 @@ About the +4 / −4 shift
 
 Tn5 transposes 9 bp apart and the standard correction many tools
 apply is +4 / −5. Cherimoya's defaults and this recipe use **+4 / −4**
-because the model treats the two end events symmetrically and the
-−5 / −4 difference is not biologically meaningful at the resolution
-Cherimoya predicts. Apply the shift here, not upstream, and **don't
-double-shift** — if your BAM is already shifted, set the shifts to
-zero.
+because the model treats the two end events symmetrically. 
+Apply the shift here, not upstream, and **don't double-shift** — 
+if your BAM is already shifted, set the shifts to zero, or to the relative
+offset if converting from +4 / -5. This idea was introduced with the
+ChromBPNet model.
 
 
 Generate the pipeline JSON
@@ -43,21 +45,20 @@ For a paired-end BAM:
        -m JASPAR_2024.meme \
        -n atac_experiment \
        -o atac.pipeline.json \
-       -ps 4 -ns -4 -u -f -pe
+       -ps 4 -ns -4 -u -pe
 
 Flag-by-flag:
 
 * ``-ps 4`` / ``-ns -4`` — Tn5 shift on plus and minus ends.
 * ``-u`` — unstranded output (single signal track).
-* ``-f`` — treat the input as fragments. With ``-pe`` set, ``bam2bw``
-  reads paired-end mates to reconstruct fragments before counting.
 * ``-pe`` — paired-end. Causes MACS3 to use ``BAMPE`` file format
   rather than ``BAM``.
 
 If your input is already a fragments TSV/BED (e.g. from
 ``snap-atac``, ``CellRanger``, or a custom ``samtools`` pipeline),
-pass the fragment file with ``-i`` and drop ``-pe``; ``bam2bw``
-detects the file extension and handles the fragment file format.
+pass the fragment file with ``-i``, add ``-f`` to indicate that the
+file is a fragment file, and drop ``-pe``; ``bam2bw`` detects the file 
+extension and handles the fragment file format.
 
 
 Run the pipeline
