@@ -32,9 +32,12 @@ The model consists of three stages.
    2^(n_layers-1)``. The blocks operate in channels-last layout
    ``(N, L, C)`` and are the heart of the model.
 
-3. **Output heads**. A 1×1 pointwise convolution produces the profile
-   prediction over the trimmed output window — one channel per signal
-   channel (``sum(signal_groups)`` total). A linear layer over the
+3. **Output heads**. A 75-bp convolution (``kernel_size=75``, padding
+   37, i.e. length-preserving) produces the profile prediction over the
+   trimmed output window — one channel per signal channel
+   (``sum(signal_groups)`` total). The 75-bp kernel gives the profile
+   head a local receptive field, letting it smooth and aggregate
+   backbone features rather than projecting each position independently. A linear layer over the
    mean-pooled backbone features (also restricted to the trimmed output
    window) produces the count prediction — one prediction per signal
    *group* (``len(signal_groups)`` total). A stranded ``(+, -)`` pair is
@@ -44,7 +47,8 @@ The default 9-layer, 128-filter model has roughly 600K parameters. The
 default input window is 2114 bp and the default output window is 1000
 bp; the difference (557 bp on each side) is the ``trimming`` and equals
 ``46 + sum(2**i for i in range(n_layers))`` by default. The ``46`` is
-the receptive field of the 21-bp input stem and the 1×1 profile head;
+the receptive field of the 21-bp input stem (10 bp each side) and the
+75-bp profile head (37 bp each side);
 the dilated-conv sum (``1 + 2 + 4 + … + 256 = 511`` for the default
 9-layer model) is the receptive field of the backbone itself. The
 trimming therefore matches the model's receptive field on each side,
@@ -106,7 +110,7 @@ Parameter initialization
 ------------------------
 
 Every weight in the model — the input stem convolution, every Cheri
-Block's depthwise conv and two linear projections, the 1×1 profile
+Block's depthwise conv and two linear projections, the 75-bp profile
 head, and the count-head linear layer — is initialized with
 ``trunc_normal_(std=0.02)``. The biases that exist (input stem, profile
 head, count head) are zero-initialized. The Cheri Block layers

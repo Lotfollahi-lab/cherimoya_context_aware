@@ -180,7 +180,7 @@ class Cherimoya(torch.nn.Module):
 		])
 
 		self.fconv = torch.nn.Conv1d(n_filters+n_control_tracks,
-			self.n_outputs, kernel_size=1, padding=0)
+			self.n_outputs, kernel_size=75, padding=37)
 
 		n_count_control = 1 if n_control_tracks > 0 else 0
 		self.linear = torch.nn.Linear(n_filters+n_count_control, self.n_groups)

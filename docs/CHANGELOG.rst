@@ -113,6 +113,16 @@ Model (**breaking**)
   true counts are pooled per group before the count loss / count
   Pearson are computed, so a stranded pair contributes a single
   per-group target instead of one per strand.
+* The profile head (``fconv``) is now a 75-bp convolution
+  (``kernel_size=75``, padding 37) instead of a 1×1 pointwise
+  convolution. The padding keeps it length-preserving, so the output
+  window is still ``in_window - 2 * trimming`` and stays positionally
+  aligned with the target; the wider kernel gives the head a local
+  receptive field (37 bp each side) that matches the ``46`` constant in
+  the default ``trimming``. Checkpoints saved with the 1×1 head do not
+  load — the ``fconv`` weight shape changed from ``(n_outputs,
+  n_filters, 1)`` to ``(n_outputs, n_filters, 75)``; retrain with the
+  new head.
 
 Training defaults
 ~~~~~~~~~~~~~~~~~

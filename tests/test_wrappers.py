@@ -155,8 +155,8 @@ def test_profile_wrapper_regression(grouped_model):
 		y_hat = ProfileWrapper(grouped_model)(X)
 
 	assert_array_almost_equal(y_hat.numpy(), [
-		[0.00002024],
-		[0.00002500]], 6)
+		[0.00151387],
+		[0.00151552]], 6)
 
 
 def test_profile_wrapper_passes_control(control_model):
@@ -211,8 +211,8 @@ def test_logcount_wrapper_regression(grouped_model):
 		y_hat = LogCountWrapper(grouped_model)(X)
 
 	assert_array_almost_equal(y_hat.numpy(), [
-		[-0.00007713, 0.00112576],
-		[-0.00055159, 0.00089704]], 6)
+		[-0.00048958, 0.00141992],
+		[0.00084040, 0.00089380]], 6)
 
 
 def test_logcount_wrapper_passes_control(control_model):
@@ -328,9 +328,9 @@ def test_expected_counts_regression(grouped_model):
 
 	# First three positions of each channel for the first example.
 	assert_array_almost_equal(y_hat[0, :, :3].numpy(), [
-		[-0.00000121, -0.00000119, -0.00000120],
-		[0.00000880, 0.00000881, 0.00000885],
-		[0.00000880, 0.00000882, 0.00000878]], 6)
+		[-0.00000807, -0.00000754, -0.00000711],
+		[0.00001016, 0.00001177, 0.00001103],
+		[0.00001058, 0.00001080, 0.00001072]], 6)
 
 
 def test_expected_counts_passes_control(control_model):

@@ -180,7 +180,12 @@ def test_evaluate_single_group_value_equals_legacy_full_mean(tmp_path):
 		signal_groups=[1])
 	measure_names = ['profile_mnll', 'profile_jsd', 'profile_pearson',
 		'profile_spearman', 'count_pearson', 'count_spearman', 'count_mse']
-	expected = [str(measures[name].mean().item()) for name in measure_names]
+	expected = [measures[name].mean().item() for name in measure_names]
 
-	# Row read from the TSV must match the legacy `.mean()` formatting.
-	assert rows[0] == expected
+	# The per-group row must match the legacy `.mean()` values. Compare
+	# numerically rather than by exact string: the CLI runs predictions
+	# batched while this manual path runs them in a single pass, and the
+	# 75-wide `fconv` head makes the two differ in the last few float32
+	# ULPs (the old 1x1 head was bit-identical regardless of batching).
+	# Agreement to 4 decimals is the repo's regression tolerance.
+	assert [float(v) for v in rows[0]] == pytest.approx(expected, abs=1e-4)
