@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Unreleased
-----------
+v0.1.1
+------
 
 Data pipeline (**breaking**)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
