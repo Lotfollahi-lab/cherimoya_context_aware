@@ -724,3 +724,25 @@ via ``subprocess.run(["cherimoya", "pipeline", "-p", jname])``.
    stranded pair); under the grouped API a flat two-element list is
    two *unstranded* tracks, so stranded batch jobs must use the
    nested form above.
+
+
+cherimoya install-skill
+-----------------------
+
+Install the bundled Cherimoya agent skill for `Claude Code
+<https://claude.com/claude-code>`_ into your skills directory, creating
+``cherimoya/`` inside it. The skill teaches the assistant to drive this CLI
+and the Python API — working out which inputs you have, choosing
+assay-appropriate settings, calling the right subcommands, and interpreting
+outputs — and to ask clarifying questions when an input is ambiguous.
+
+CLI flags:
+
+* ``-d, --directory`` — skills directory to install into. Default
+  ``~/.claude/skills``.
+* ``--symlink`` — symlink the packaged skill instead of copying it, so
+  in-place edits are reflected without reinstalling. Breaks if the install
+  location moves.
+* ``-f, --force`` — overwrite an existing installation at the destination.
+
+Restart Claude Code (or reload skills) to pick it up.

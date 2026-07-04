@@ -98,11 +98,11 @@ Any input path can be remote (S3, HTTPS, etc.); the pipeline streams reads throu
 cherimoya pipeline -p pipeline.json
 ```
 
-This calls peaks with MACS3, samples GC-matched negatives, trains a Cherimoya model, computes attributions via saturation mutagenesis, calls seqlets, annotates them with tomtom-lite, and runs TF-MoDISco. The outputs land in the working directory: a `.torch` model checkpoint and training log, per-track bigWigs, a saturation-mutagenesis attribution array (`.npz`), a seqlet table with tomtom-lite annotations, and a TF-MoDISco results H5. Each sub-step writes its own JSON snapshot so individual stages can be re-run in isolation with the `negatives`, `fit`, `evaluate`, `attribute`, `marginalize`, or `seqlets` subcommands. The `batch` subcommand parallelizes a pipeline across multiple datasets. See [the CLI reference](https://cherimoya.readthedocs.io/en/latest/cli.html) for the full command list and JSON schema.
+This calls peaks with MACS3, samples GC-matched negatives, trains a Cherimoya model, computes attributions via saturation mutagenesis, calls seqlets, annotates them with tomtom-lite, and runs TF-MoDISco. The outputs land in the working directory: a `.torch` model checkpoint and training log, per-track bigWigs, a saturation-mutagenesis attribution array (`.npz`), a seqlet table with tomtom-lite annotations, and a TF-MoDISco results H5. Each sub-step writes its own JSON snapshot so individual stages can be re-run in isolation with the `negatives`, `fit`, `evaluate`, `attribute`, `marginalize`, or `seqlets` subcommands. See [the CLI reference](https://cherimoya.readthedocs.io/en/latest/cli.html) for the full command list and JSON schema.
 
 ### Python API and saving/loading
 
-For programmatic use, the three public symbols are `Cherimoya` (the model), `CheriBlock` (the building block), and `EMA` (the parameter exponential-moving-average wrapper used during training). See the [Python API tutorial](https://cherimoya.readthedocs.io/en/latest/tutorials/python_api.html) for an end-to-end training walkthrough:
+For programmatic use, the public API is `Cherimoya` (the model), `CheriBlock` (the building block), `EMA` (the parameter exponential-moving-average wrapper used during training), and four output wrappers — `ControlWrapper`, `ProfileWrapper`, `LogCountWrapper`, and `ExpectedCountsWrapper` — that expose a single tensor from the model's `(profile, log-count)` output for attribution and design tools. See the [Python API tutorial](https://cherimoya.readthedocs.io/en/latest/tutorials/python_api.html) for an end-to-end training walkthrough:
 
 ```python
 from cherimoya import Cherimoya
@@ -120,6 +120,24 @@ model = Cherimoya.load("my_model.torch", device="cuda")
 ```
 
 Older checkpoints saved with `torch.save(model, ...)` are not compatible with `Cherimoya.load` and must be retrained. The CLI subcommands and `model.fit(...)` use this format internally. See [the save/load guide](https://cherimoya.readthedocs.io/en/latest/tutorials/save_load.html) for full semantics (including that the saved weights are the EMA snapshot) and [the Python API reference](https://cherimoya.readthedocs.io/en/latest/api/model.html) for the full `fit()` and `predict()` signatures.
+
+### Claude Code skill
+
+Cherimoya ships an agent skill for [Claude Code](https://claude.com/claude-code) that teaches the assistant to drive the CLI pipeline and Python API on your behalf — working out which inputs you have, choosing assay-appropriate settings, calling the right subcommands, and interpreting the outputs. It uses progressive disclosure: a short router plus topic-specific reference files (training pipeline, input files, assay defaults, interpreting outputs, troubleshooting, CLI reference, Python usage, tangermeme analysis, and a concepts primer) that load only when relevant. The skill is built to ask a clarifying question when an input is ambiguous rather than guess, and to explain in plain language which defaults it applied and why — so it stays useful even if you're new to sequence modeling.
+
+Install it with the bundled subcommand:
+
+```bash
+cherimoya install-skill
+```
+
+This copies the skill into `~/.claude/skills/cherimoya`. Options:
+
+- `-d, --directory DIR` — install into a different skills directory (default `~/.claude/skills`).
+- `--symlink` — symlink the packaged skill instead of copying it, so in-place edits to the installed package are reflected without reinstalling.
+- `-f, --force` — overwrite an existing installation at the destination.
+
+Restart Claude Code (or reload skills) to pick it up, then just describe what you want — for example, *"I have a ChIP-seq BAM and a genome FASTA here, train a Cherimoya model on them"* — and the skill guides the run, asking about anything it needs.
 
 ### Documentation
 

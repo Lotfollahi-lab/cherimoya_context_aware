@@ -14,12 +14,13 @@ from .commands import seqlets
 from .commands import marginalize
 from .commands import pipeline
 from .commands import batch
+from .commands import install_skill
 
 
 desc = """A command-line tool for the training and usage of Cherimoya models."""
 
 _help = """Must be either 'negatives', 'fit', 'evaluate',
-	'attribute', 'seqlets', 'marginalize', or 'pipeline'."""
+	'attribute', 'seqlets', 'marginalize', 'pipeline', or 'install-skill'."""
 
 
 def main():
@@ -37,6 +38,7 @@ def main():
 	seqlets.add_parser(subparsers)
 	marginalize.add_parser(subparsers)
 	pipeline.add_parser(subparsers)
+	install_skill.add_parser(subparsers)
 
 	args = parser.parse_args()
 	
@@ -50,6 +52,7 @@ def main():
 		'seqlets': seqlets.run,
 		'marginalize': marginalize.run,
 		'pipeline': pipeline.run,
+		'install-skill': install_skill.run,
 	}
 
 	commands[args.cmd](args)

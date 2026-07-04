@@ -52,6 +52,9 @@ cherimoya = "cherimoya_cli.__main__:main"
 [tool.setuptools]
 packages = ["cherimoya", "cherimoya_cli", "cherimoya_cli.commands"]
 
+[tool.setuptools.package-data]
+cherimoya_cli = ["skills/cherimoya/SKILL.md", "skills/cherimoya/references/*.md"]
+
 [tool.pytest.ini_options]
 markers = [
     "cuda: requires a CUDA device (skipped when no GPU is available)",
