@@ -22,14 +22,23 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None,
 
 	This function takes in the observed integer read counts, the predicted logits,
 	and the predicted logcounts, and returns per-*group* profile and count
-	losses. Each channel is treated as an independent multinomial along the
-	length dimension; the per-channel multinomial likelihoods are then
-	averaged within each signal group so every group contributes one
-	profile-loss term regardless of how many channels it contains. The
-	count loss is per-group by construction (one prediction per group). When
-	``signal_groups`` is None the function falls back to per-channel losses
-	(every channel is its own group for the purposes of this aggregation),
-	which matches the pre-grouping behavior.
+	losses. Each signal group is scored as a **single multinomial over its
+	channels and length jointly**: the group's channels are concatenated,
+	one ``log_softmax`` is taken over the flattened ``channels * length``
+	axis, and one MNLL is computed against the group's observed counts. This
+	matches how :class:`~cherimoya.wrappers.ExpectedCountsWrapper` distributes
+	a group's predicted counts across its channels and positions, so for a
+	stranded ``(+, -)`` pair the relative magnitude between the two strands
+	is part of the trained objective rather than an unconstrained per-channel
+	gauge. (A per-channel normalization leaves that relative offset free,
+	which lets a trained model collapse nearly all of a group's predicted
+	signal onto a single strand at inference — the joint normalization here
+	is what prevents that.) A single-channel (unstranded) group reduces
+	exactly to a per-length multinomial, so accessibility models are
+	unaffected. The count loss is per-group by construction (one prediction
+	per group). When ``signal_groups`` is None the function falls back to
+	per-channel losses (every channel is its own group), which matches the
+	pre-grouping behavior.
 
 
 	Parameters
@@ -58,9 +67,10 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None,
 		Default is None.
 
 	signal_groups: list of int or None, optional
-		Group sizes for the channel dimension of ``y``. When given, both
-		the per-channel profile MNLLs and the true counts are pooled per
-		group: a stranded ``(+, -)`` pair contributes one profile-loss
+		Group sizes for the channel dimension of ``y``. When given, each
+		group's channels are normalized jointly (a single multinomial over
+		the group's ``channels * length``) and the true counts are pooled
+		per group: a stranded ``(+, -)`` pair contributes one profile-loss
 		term and one count-target. ``sum(signal_groups)`` must equal
 		``y.shape[1]``. When None, every channel is treated as its own
 		group (legacy behavior). Default is None.
@@ -69,16 +79,15 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None,
 	Returns
 	-------
 	profile_loss: torch.Tensor, shape=(n_groups,) or (n_outputs,)
-		The per-group multinomial log likelihood (mean across the group's
-		channels then mean across examples). Falls back to per-channel
-		shape ``(n_outputs,)`` when ``signal_groups`` is None.
+		The per-group multinomial log likelihood (one joint multinomial
+		over the group's channels and length, mean across examples). Falls
+		back to per-channel shape ``(n_outputs,)`` when ``signal_groups``
+		is None.
 
 	count_loss: torch.Tensor, shape=(n_count_outputs,)
 		The per-group (or per-track) mean-squared error on log(count+1),
 		averaged across examples.
 	"""
-
-	log_probs = torch.nn.functional.log_softmax(y_hat_logits, dim=-1)
 
 	# Per-channel true counts: (n, n_outputs).
 	y_per_track = y.sum(dim=-1)
@@ -90,34 +99,55 @@ def _mixture_loss(y, y_hat_logits, y_hat_logcounts, labels=None,
 				"sum(signal_groups)={} does not match y.shape[1]={}"
 				.format(sum(signal_groups), y_per_track.shape[-1]))
 
-	# Profile loss: per-example per-channel MNLL, then mean over examples
-	# -> shape (n_outputs,).
+	# Restrict the profile loss to peak examples when labels are given;
+	# the count loss always runs on the full batch (below).
 	if labels is not None:
-		mnll = MNLLLoss(log_probs[labels == 1], y[labels == 1])
+		y_prof = y[labels == 1]
+		logits_prof = y_hat_logits[labels == 1]
 	else:
-		mnll = MNLLLoss(log_probs, y)
-	profile_loss = mnll.mean(dim=0)
+		y_prof = y
+		logits_prof = y_hat_logits
 
-	# Pool the per-channel profile MNLL into a per-group mean so every
-	# group contributes one loss term, regardless of channel count.
-	# Pool the per-channel true counts likewise so the count target is
-	# per-group. Both poolings are skipped for the all-size-one case
-	# (pure identity) to avoid an unnecessary copy.
+	# Profile loss. Each signal group is scored as a single multinomial
+	# over its channels and length jointly: the group's logits are
+	# flattened to (n, group_channels * length), one log_softmax is
+	# applied, and one MNLL is computed over the flattened axis. This
+	# couples a stranded (+, -) pair so the relative magnitude between its
+	# strands is part of the objective, matching how
+	# ExpectedCountsWrapper spreads a group's counts at inference.
+	#
+	# When every group is size one (the accessibility / unstranded
+	# multi-task case, and the signal_groups=None fallback) a joint
+	# softmax over a one-channel group is identical to a per-channel
+	# softmax over length, so this path is taken via the vectorized
+	# branch below and is bit-identical to the pre-grouping code.
+	groups = ([1] * y_prof.shape[1] if signal_groups is None
+		else list(signal_groups))
+
+	if all(g == 1 for g in groups):
+		log_probs = torch.nn.functional.log_softmax(logits_prof, dim=-1)
+		profile_loss = MNLLLoss(log_probs, y_prof).mean(dim=0)
+	else:
+		n = logits_prof.shape[0]
+		per_group = []
+		offset = 0
+		for g in groups:
+			logits_g = logits_prof[:, offset:offset+g].reshape(n, -1)
+			y_g = y_prof[:, offset:offset+g].reshape(n, -1)
+			log_probs_g = torch.nn.functional.log_softmax(logits_g, dim=-1)
+			per_group.append(MNLLLoss(log_probs_g, y_g).mean(dim=0))
+			offset += g
+		profile_loss = torch.stack(per_group)
+
+	# Per-group true counts (sum over each group's channels) so the count
+	# target matches the per-group count head. Skipped for the all-size-one
+	# case (pure identity) to avoid an unnecessary copy.
 	if signal_groups is not None and len(signal_groups) != y_per_track.shape[-1]:
 		groups_t = torch.tensor(signal_groups, device=y_per_track.device)
 		group_idx = torch.repeat_interleave(
 			torch.arange(len(signal_groups), device=y_per_track.device),
 			groups_t)
 
-		# Per-group profile loss: sum then divide by group size.
-		profile_per_group = torch.zeros(len(signal_groups),
-			device=profile_loss.device, dtype=profile_loss.dtype)
-		profile_per_group.index_add_(0, group_idx, profile_loss)
-		profile_per_group = profile_per_group / groups_t.to(
-			profile_loss.dtype)
-		profile_loss = profile_per_group
-
-		# Per-group true counts: sum.
 		n = y_per_track.shape[0]
 		y_per_group = torch.zeros(n, len(signal_groups),
 			device=y_per_track.device, dtype=y_per_track.dtype)

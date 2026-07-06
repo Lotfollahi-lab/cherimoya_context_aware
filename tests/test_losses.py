@@ -3,6 +3,8 @@
 import pytest
 import torch
 
+from bpnetlite.losses import MNLLLoss
+
 from cherimoya.losses import _mixture_loss
 
 
@@ -85,9 +87,9 @@ def test_mixture_loss_is_differentiable():
 def test_mixture_loss_signal_groups_pool_counts_per_group():
 	"""When signal_groups=[1, 2] is given, both the profile loss and
 	the count loss are per-group: the stranded pair contributes ONE
-	profile-loss term (mean of its two strands' MNLLs) and ONE count
-	target (sum of its two strands' counts). Each group thus
-	contributes equally to the total loss regardless of channel count."""
+	profile-loss term (a single joint multinomial over its two strands
+	and length) and ONE count target (sum of its two strands' counts).
+	Each group thus contributes one term regardless of channel count."""
 
 	# 3 channels: 1 unstranded + 1 stranded pair = 2 groups.
 	y, logits, _ = _toy_inputs(n_outputs=3)
@@ -100,8 +102,7 @@ def test_mixture_loss_signal_groups_pool_counts_per_group():
 	assert profile_loss.shape == (2,)  # one per group
 	assert count_loss.shape == (2,)    # one per group
 
-	# Sanity: per-group MSE matches hand-pooled y; per-group profile
-	# loss equals the mean of the per-channel losses for that group.
+	# Sanity: per-group MSE matches hand-pooled y.
 	y_per_track = y.sum(dim=-1)
 	y_per_group = torch.stack([
 		y_per_track[:, 0],
@@ -111,14 +112,100 @@ def test_mixture_loss_signal_groups_pool_counts_per_group():
 		).mean(dim=0)
 	assert torch.allclose(count_loss, expected_count, atol=1e-5)
 
-	# Re-derive the per-channel profile losses and pool to per-group.
-	per_channel = _mixture_loss(y, logits,
-		torch.zeros(y.shape[0], 3))[0]  # signal_groups=None -> shape (3,)
+	# Per-group profile loss is a single joint multinomial over the
+	# group's flattened (channels * length) axis. Group 0 (size 1) is a
+	# plain per-length multinomial of channel 0; group 1 (size 2) is one
+	# multinomial over channels 1 and 2 concatenated.
+	n = y.shape[0]
+	lp0 = torch.nn.functional.log_softmax(logits[:, 0:1].reshape(n, -1), dim=-1)
+	lp1 = torch.nn.functional.log_softmax(logits[:, 1:3].reshape(n, -1), dim=-1)
 	expected_profile = torch.stack([
-		per_channel[0],
-		(per_channel[1] + per_channel[2]) / 2,
+		MNLLLoss(lp0, y[:, 0:1].reshape(n, -1)).mean(dim=0),
+		MNLLLoss(lp1, y[:, 1:3].reshape(n, -1)).mean(dim=0),
 	])
 	assert torch.allclose(profile_loss, expected_profile, atol=1e-5)
+
+
+def test_mixture_loss_grouped_profile_matches_joint_multinomial():
+	"""A stranded (+, -) group's profile loss equals a single multinomial
+	over both strands concatenated — i.e. the two strands are normalized
+	jointly, not independently (the fix for the one-strand-collapse bug)."""
+
+	y, logits, _ = _toy_inputs(n_outputs=2)
+	logcounts = torch.zeros(y.shape[0], 1)
+
+	profile_loss, _ = _mixture_loss(y, logits, logcounts, signal_groups=[2])
+	assert profile_loss.shape == (1,)
+
+	n = y.shape[0]
+	log_probs = torch.nn.functional.log_softmax(logits.reshape(n, -1), dim=-1)
+	expected = MNLLLoss(log_probs, y.reshape(n, -1)).mean(dim=0)
+	assert torch.allclose(profile_loss, expected, atol=1e-5)
+
+
+def test_mixture_loss_grouped_profile_couples_strands():
+	"""Regression test for the one-strand-collapse bug. Under the joint
+	per-group normalization the profile loss must respond to the RELATIVE
+	offset between a group's strands: shifting one strand's logits by a
+	constant re-weights the multinomial and changes the loss. The pre-fix
+	per-channel normalization left that relative offset a free gauge
+	(loss invariant to it), which let a trained model dump nearly all of a
+	group's predicted counts onto a single strand at inference. A constant
+	shift applied to the WHOLE group is the true softmax gauge and must
+	leave the loss unchanged."""
+
+	y, logits, _ = _toy_inputs(n_outputs=2)
+	logcounts = torch.zeros(y.shape[0], 1)
+
+	base, _ = _mixture_loss(y, logits, logcounts, signal_groups=[2])
+
+	# Shift only the plus strand: the joint softmax MUST see this.
+	one_strand = logits.clone()
+	one_strand[:, 0] += 3.0
+	shifted, _ = _mixture_loss(y, one_strand, logcounts, signal_groups=[2])
+	assert not torch.allclose(base, shifted, atol=1e-4)
+
+	# Shift the whole group (both strands, all positions): pure gauge.
+	whole_group, _ = _mixture_loss(y, logits + 5.0, logcounts,
+		signal_groups=[2])
+	assert torch.allclose(base, whole_group, atol=1e-4)
+
+
+def test_mixture_loss_single_output_bit_identical_across_group_specs():
+	"""Single-output (unstranded, e.g. ATAC/DNase) models must be
+	completely unaffected by the grouped-normalization change: passing
+	signal_groups=None, [1], or omitting it entirely must all produce the
+	exact same profile and count losses, bit-for-bit. This is the
+	guarantee that accessibility checkpoints need no retraining."""
+
+	y, logits, logcounts = _toy_inputs(n_outputs=1, n_count_outputs=1)
+
+	prof_none, count_none = _mixture_loss(y, logits, logcounts)
+	prof_grp, count_grp = _mixture_loss(y, logits, logcounts,
+		signal_groups=[1])
+
+	# Exact equality (not allclose): same ops, same order.
+	assert torch.equal(prof_none, prof_grp)
+	assert torch.equal(count_none, count_grp)
+
+	# And both equal a hand-written per-channel multinomial.
+	log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+	expected_prof = MNLLLoss(log_probs, y).mean(dim=0)
+	assert torch.equal(prof_none, expected_prof)
+
+
+def test_mixture_loss_all_size_one_groups_bit_identical():
+	"""signal_groups=[1, 1, 1] (several unstranded co-trained tracks) must
+	be bit-identical to the per-channel signal_groups=None path for BOTH
+	the profile and count losses — the joint-normalization branch is never
+	entered when every group is size one."""
+
+	y, logits, logcounts = _toy_inputs(n_outputs=3, n_count_outputs=3)
+	prof_none, count_none = _mixture_loss(y, logits, logcounts)
+	prof_grp, count_grp = _mixture_loss(y, logits, logcounts,
+		signal_groups=[1, 1, 1])
+	assert torch.equal(prof_none, prof_grp)
+	assert torch.equal(count_none, count_grp)
 
 
 def test_mixture_loss_signal_groups_all_size_one_matches_legacy():

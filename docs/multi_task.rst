@@ -274,9 +274,10 @@ stranded TF pairs — 5 profile channels and 3 count predictions:
 
 **Loss.** Each group contributes exactly one profile-loss term and
 one count-loss term, regardless of how many channels it has. The
-ATAC group's profile MNLL is the per-channel MNLL of its one
-channel; each TF group's profile MNLL is the mean of its ``+`` and
-``-`` strand MNLLs. All three group-level profile losses then get
+ATAC group's profile MNLL is the per-length MNLL of its one channel;
+each TF group's profile MNLL is a single multinomial over its ``+``
+and ``-`` strands concatenated (normalized jointly, so the strand
+balance is learned). All three group-level profile losses then get
 weighted by Kendall-Gal uncertainty weights (``lw0`` is shape
 ``(3,)``), summed with the per-group count MSEs (also weighted by
 ``lw1`` shape ``(3,)``), and that's the total loss. The result is
@@ -392,9 +393,10 @@ two learnable weight tensors ``lw0`` and ``lw1`` both shape
 ``(len(signal_groups),)`` — one uncertainty weight per group on each
 side of the profile / counts split. Concretely:
 
-* The per-channel profile MNLL is averaged within each group, then
-  weighted by ``lw0``. A stranded pair contributes one profile-loss
-  term (the mean of its two strands' MNLLs), exactly the same
+* Each group's profile MNLL is a single multinomial over that group's
+  channels and length jointly, then weighted by ``lw0``. A stranded
+  pair contributes one profile-loss term (both strands normalized
+  together, so their relative magnitude is trained), exactly the same
   number of terms an unstranded track contributes.
 * The per-group count MSE is weighted by ``lw1`` directly.
 

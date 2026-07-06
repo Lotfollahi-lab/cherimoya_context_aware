@@ -108,6 +108,28 @@ The most common causes, in order:
    when generating bigWigs) or cap with ``max_counts``.
 
 
+Stranded predictions come from only one strand
+----------------------------------------------
+
+Symptom: a stranded ``(+, -)`` model (TF ChIP, PRO-cap, ...) produces
+a reconstructed profile (via
+:class:`cherimoya.wrappers.ExpectedCountsWrapper`) with nearly all of
+its signal on one strand, even though the observed data has comparable
+coverage on both strands offset by ~100-300 bp.
+
+This was a profile-loss bug fixed in the **Unreleased** release. The
+loss previously normalized each strand of a group independently, which
+left the relative magnitude between strands an unconstrained gauge; the
+inference wrapper distributes a group's counts with a *joint* softmax
+across both strands, exponentiating that arbitrary offset and collapsing
+the signal onto one strand. The loss now normalizes each signal group's
+channels jointly, so the strand balance is a trained quantity. Models
+trained on an older release have the miscalibrated offset baked into
+their weights and must be **retrained**. Unstranded ATAC/DNase models
+are unaffected (the change is bit-identical for single-channel groups).
+See the :doc:`CHANGELOG`.
+
+
 Training Pearson is stuck near zero
 -----------------------------------
 

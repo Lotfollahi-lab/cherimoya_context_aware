@@ -43,6 +43,20 @@ By likelihood:
    train/validation shapes printed at startup. Confirm a stranded `(+, -)` pair
    is nested (`[["plus.bw","minus.bw"]]`), not flat (see `input-files.md`).
 
+## "Stranded predictions come almost entirely from one strand"
+
+A stranded `(+, -)` model (TF ChIP, PRO-cap, etc.) whose reconstructed
+`ExpectedCountsWrapper` profile has nearly all its signal on one strand,
+even though the observed data has comparable coverage on both (offset by
+~100-300 bp). Fixed in the **Unreleased** release: the profile loss now
+normalizes each signal group's channels **jointly** (one multinomial over
+both strands + length) instead of per-strand, so the strand balance is
+trained. Models trained with an older release have an uncalibrated
+strand offset baked into their weights — **retrain** with a current
+release to fix. Unstranded ATAC/DNase models are unaffected (the change
+is bit-identical for single-channel groups). See the CHANGELOG entry
+"Loss (breaking for stranded/multi-channel models)".
+
 ## "Validation Pearson is stuck near zero"
 
 1. **Validation chromosomes contain no peaks.** Check `Validation Set Size` at
