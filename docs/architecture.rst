@@ -189,11 +189,17 @@ Cherimoya uses a two-component loss, both terms pooled per signal
 group so every modality contributes equally regardless of channel
 count:
 
-* **Profile loss**: Per-channel multinomial negative log-likelihood
-  (MNLL) along the length axis, then averaged across the channels of
-  each signal group. A stranded ``(+, -)`` pair contributes one
-  profile-loss term (the mean of its two strands' MNLLs); an
-  unstranded track contributes one term directly.
+* **Profile loss**: One multinomial negative log-likelihood (MNLL)
+  per signal group, normalized **jointly** across the group's channels
+  and length — the group's channels are concatenated, a single
+  ``log_softmax`` is taken over the flattened ``channels * length``
+  axis, and one MNLL is computed against the group's counts. A stranded
+  ``(+, -)`` pair is therefore scored as a single distribution over
+  both strands, so the relative magnitude between the two strands is
+  part of the trained objective (a per-channel normalization would
+  leave it a free gauge and let the model collapse a group's signal
+  onto one strand at inference). An unstranded track reduces exactly to
+  a per-length multinomial.
 
 * **Counts loss**: ``log1pMSE`` between predicted log counts and
   ``log(1 + total_counts)``, computed per signal *group*. A stranded

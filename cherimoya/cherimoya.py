@@ -580,8 +580,10 @@ class Cherimoya(torch.nn.Module):
 				# `measures['profile_pearson']` is shape
 				# (n_loci, sum(signal_groups)); for each group, average
 				# over its channels and the locus dim so each modality
-				# contributes one number, matching how the loss is
-				# pooled and how the count Pearson is reported.
+				# contributes one number -- a per-group summary like the
+				# count Pearson. The Pearson metric stays per-channel and
+				# is scale-invariant, so this channel-average is unaffected
+				# by the loss's joint per-group normalization.
 				per_group_profile_corr = []
 				offset = 0
 				for g in self.signal_groups:

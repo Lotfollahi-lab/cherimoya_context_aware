@@ -4,6 +4,36 @@ Changelog
 Unreleased
 ----------
 
+Loss (**breaking** for stranded/multi-channel models)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Fixed the profile loss so a multi-channel signal group is normalized
+  as a **single multinomial over its channels and length jointly**,
+  rather than one independent per-channel multinomial per strand then
+  averaged. Previously the relative additive offset between a stranded
+  ``(+, -)`` pair's logits was an unconstrained gauge (a per-channel
+  ``log_softmax`` over length is invariant to a per-channel shift), so a
+  trained model could place that offset arbitrarily. At inference,
+  :class:`cherimoya.wrappers.ExpectedCountsWrapper` distributes a
+  group's predicted counts with a *joint* softmax across the group's
+  channels and positions, which exponentiates that arbitrary offset and
+  collapses nearly all predicted signal onto a single strand — the
+  symptom being stranded TF models whose predictions came almost
+  entirely from one strand. The loss now matches the wrapper's joint
+  normalization, so the strand balance is a trained quantity.
+* **Single-channel (unstranded) models are unaffected — bit-for-bit.**
+  A joint softmax over a one-channel group is identical to a per-channel
+  softmax over length, so ATAC-seq / DNase-seq losses, gradients, and
+  training trajectories are unchanged and existing accessibility
+  checkpoints need no retraining. Only groups with two or more channels
+  (stranded TF / co-trained stranded modalities) change, and those
+  models should be **retrained** to benefit from the fix.
+* ``cherimoya.performance.calculate_performance_measures`` is
+  unchanged: ``profile_pearson`` / ``profile_spearman`` are invariant to
+  per-channel vs. joint normalization (both operate over the length axis
+  and are scale-invariant), and ``profile_jsd`` re-normalizes each
+  channel internally, so reported metrics are identical.
+
 Training defaults
 ~~~~~~~~~~~~~~~~~
 
@@ -88,11 +118,12 @@ Data pipeline (**breaking**)
   to which modality.
 * Every signal group now contributes one term to the loss
   regardless of how many channels it has. ``_mixture_loss``'s
-  profile component is averaged within each group (so a stranded
-  ``(+, -)`` pair's two per-strand MNLLs combine into one
-  per-group profile loss) before Kendall-Gal weighting; ``lw0``
-  drops from shape ``(sum(signal_groups),)`` to
-  ``(len(signal_groups),)``, matching ``lw1``. The summary log's
+  profile component combined a stranded ``(+, -)`` pair's two
+  per-strand MNLLs into one per-group profile loss before
+  Kendall-Gal weighting (this per-channel averaging was later
+  replaced by a joint per-group multinomial — see the Unreleased
+  entry above); ``lw0`` drops from shape ``(sum(signal_groups),)``
+  to ``(len(signal_groups),)``, matching ``lw1``. The summary log's
   ``Validation Profile Pearson`` now reports the mean over groups
   of (mean over the group's channels) so the headline metric
   agrees with the loss weighting — no double-counting of stranded
