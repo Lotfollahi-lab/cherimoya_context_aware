@@ -16,6 +16,24 @@ def _toy_inputs(n=2, n_outputs=1, length=8, n_count_outputs=1, seed=0):
 	return y, y_hat_logits, y_hat_logcounts
 
 
+def _legacy_single_output_profile_loss(y, logits, labels=None):
+	"""The pre-fix per-channel profile formula, reproducing ``main``'s fast
+	path exactly (per-channel ``log_softmax`` over length, then per-example
+	MNLL, then mean over examples). Used as a bitwise reference for the
+	accessibility no-op guarantee. This reference has been confirmed
+	bitwise-equal to ``main``'s actual ``_mixture_loss`` output — forward
+	values *and* gradients — via a cross-branch harness (see the PR
+	verification notes), so pinning the new code to it here is a valid
+	standing regression against the pre-grouping behavior."""
+
+	log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+	if labels is not None:
+		mnll = MNLLLoss(log_probs[labels == 1], y[labels == 1])
+	else:
+		mnll = MNLLLoss(log_probs, y)
+	return mnll.mean(dim=0)
+
+
 def test_mixture_loss_returns_per_track_vectors():
 	y, logits, logcounts = _toy_inputs()
 	profile_loss, count_loss = _mixture_loss(y, logits, logcounts)
@@ -192,6 +210,34 @@ def test_mixture_loss_single_output_bit_identical_across_group_specs():
 	log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
 	expected_prof = MNLLLoss(log_probs, y).mean(dim=0)
 	assert torch.equal(prof_none, expected_prof)
+
+
+def test_mixture_loss_single_output_matches_legacy_forward_and_grad():
+	"""Single-output (ATAC/DNase) profile loss AND its gradient w.r.t. the
+	logits are bitwise-identical to the pre-fix per-channel formula, with
+	and without the ``labels`` filter and at a realistic output length.
+	This guards the accessibility no-op guarantee at the *gradient* level
+	(what actually drives training), not just the forward value, and pins
+	the reordered slice-then-softmax ``labels`` branch."""
+
+	for labels in (None, torch.tensor([1, 0, 1, 0])):
+		g = torch.Generator().manual_seed(3)
+		n = 4
+		y = torch.randint(0, 60, (n, 1, 200), generator=g).float()
+		base_logits = torch.randn(n, 1, 200, generator=g)
+		logcounts = torch.randn(n, 1, generator=g)
+
+		logits = base_logits.clone().requires_grad_(True)
+		profile_loss, _ = _mixture_loss(y, logits, logcounts, labels=labels,
+			signal_groups=[1])
+		profile_loss.sum().backward()
+
+		ref_logits = base_logits.clone().requires_grad_(True)
+		ref = _legacy_single_output_profile_loss(y, ref_logits, labels=labels)
+		ref.sum().backward()
+
+		assert torch.equal(profile_loss, ref)
+		assert torch.equal(logits.grad, ref_logits.grad)
 
 
 def test_mixture_loss_all_size_one_groups_bit_identical():
