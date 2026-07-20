@@ -31,6 +31,12 @@ git clone https://github.com/jmschrei/cherimoya.git
 cd cherimoya && pip install -e .
 ```
 
+Or pull the prebuilt Docker image:
+
+```bash
+docker pull ramirc1/cherimoya:latest      # or pin a version: ramirc1/cherimoya:0.2.0
+```
+
 GPU acceleration requires Triton and a CUDA-capable device; a pure-PyTorch CPU fallback is available for everything except the inference megakernel. See [the installation guide](https://cherimoya.readthedocs.io/en/latest/installation.html) for Triton compatibility notes.
 
 ### What you can do with Cherimoya
