@@ -186,3 +186,57 @@ def test_fit_does_not_flatten_signals_for_downstream_evaluate(tmp_path):
 	assert captured.get('signals') == original_signals, (
 		"fit flattened the structured signals form before PeakGenerator: "
 		"got {!r}".format(captured.get('signals')))
+
+
+# --------- _resolve_group_names (wandb per-group labels) --------------------
+
+def test_resolve_group_names_explicit_override_wins():
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	names = _resolve_group_names(
+		['a.bw', 'b.bw'], [1, 1], explicit_names=['x', 'y'])
+	assert names == ['x', 'y']
+
+
+def test_resolve_group_names_derives_from_basenames():
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	names = _resolve_group_names(
+		['/data/atac.B1_B.bw', '/data/atac.T_cell.bw'], [1, 1],
+		explicit_names=None)
+	assert names == ['atac.B1_B', 'atac.T_cell']
+
+
+def test_resolve_group_names_uses_first_channel_of_multi_channel_group():
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	names = _resolve_group_names(
+		['ctcf.+.bw', 'ctcf.-.bw'], [2], explicit_names=None)
+	assert names == ['ctcf.+']
+
+
+def test_resolve_group_names_falls_back_to_none_on_collision():
+	"""Two groups deriving the same label would silently merge two
+	celltypes' wandb series -- must fall back to None (generic group_{i}
+	labeling in Cherimoya.fit) rather than produce ambiguous keys."""
+
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	names = _resolve_group_names(
+		['a/atac.bw', 'b/atac.bw'], [1, 1], explicit_names=None)
+	assert names is None
+
+
+def test_resolve_group_names_none_when_no_signals():
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	assert _resolve_group_names(None, [], explicit_names=None) is None
+
+
+def test_resolve_group_names_is_signal_count_agnostic():
+	from cherimoya_cli.commands.fit import _resolve_group_names
+
+	files = ['{}.bw'.format(i) for i in range(21)]
+	names = _resolve_group_names(files, [1] * 21, explicit_names=None)
+	assert len(names) == 21
+	assert names == [str(i) for i in range(21)]
