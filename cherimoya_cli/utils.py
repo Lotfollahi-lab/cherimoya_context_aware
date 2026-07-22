@@ -50,7 +50,8 @@ def merge_parameters(parameters, default_parameters):
 			parameters = json.load(infile)
 
 	unset_parameters = ("controls", "warning_threshold", "early_stopping",
-		"count_loss_weight", "exclusion_lists", "fold_bed")
+		"count_loss_weight", "exclusion_lists", "fold_bed", "wandb_project",
+		"wandb_name", "wandb_entity", "wandb_mode", "wandb_group_names")
 	for parameter, value in default_parameters.items():
 		if parameter not in parameters:
 			if value is None and parameter not in unset_parameters:
