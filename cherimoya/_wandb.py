@@ -94,7 +94,7 @@ def init(wandb_config):
 
 
 def log_epoch(run, epoch, column_names, row_values, per_group_profile,
-		per_group_count, signal_group_names=None):
+		per_group_count, signal_group_names=None, per_group_jsd=None):
 	"""Log one epoch's metrics as a single ``wandb.log`` call.
 
 	The summary portion is built by zipping ``column_names`` with
@@ -129,6 +129,13 @@ def log_epoch(run, epoch, column_names, row_values, per_group_profile,
 		Human-readable label per signal group, same length as
 		``per_group_profile``/``per_group_count``. Default is None,
 		which labels groups ``group_0``, ``group_1``, ....
+
+	per_group_jsd: list of float or None, optional
+		Per-group validation profile Jensen-Shannon distance, one value
+		per signal group. Default is None (not requested), in which case
+		no ``val/profile_jsd/*`` keys are added -- mirrors
+		``per_group_profile``/``per_group_count`` and is where a future
+		optional per-group metric would plug in the same way.
 	"""
 
 	if run is None:
@@ -144,6 +151,11 @@ def log_epoch(run, epoch, column_names, row_values, per_group_profile,
 		for i, value in enumerate(per_group_count):
 			label = signal_group_names[i] if signal_group_names else "group_{}".format(i)
 			payload["val/count_pearson/{}".format(label)] = value
+
+		if per_group_jsd is not None:
+			for i, value in enumerate(per_group_jsd):
+				label = signal_group_names[i] if signal_group_names else "group_{}".format(i)
+				payload["val/profile_jsd/{}".format(label)] = value
 
 		run.log(payload, step=epoch)
 	except Exception as exc:  # noqa: BLE001 -- a dropped metric must never kill training

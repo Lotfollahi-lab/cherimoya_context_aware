@@ -397,7 +397,8 @@ class Cherimoya(torch.nn.Module):
 	def fit(self, training_data, muon_optimizer, adam_optimizer, lw_optimizer,
 		muon_scheduler, adam_scheduler, lw_scheduler, X_valid, X_ctl_valid,
 		y_valid, max_epochs=50, batch_size=64, dtype='float32', device='cuda',
-		early_stopping=None, wandb_config=None, signal_group_names=None):
+		early_stopping=None, wandb_config=None, signal_group_names=None,
+		measures=('profile_pearson', 'count_pearson')):
 		"""Fit the model to data and validate it periodically.
 
 		This method controls the training of a Cherimoya model. It will fit
@@ -492,6 +493,25 @@ class Cherimoya(torch.nn.Module):
 			``self.signal_groups``, used only to name per-group series in
 			wandb. If None, groups are labeled generically (``group_0``,
 			``group_1``, ...). Has no effect when ``wandb_config`` is None.
+
+		measures: tuple or list of str, optional
+			Which measures :func:`cherimoya.performance.calculate_performance_measures`
+			computes on the validation set each epoch. Default is
+			``('profile_pearson', 'count_pearson')`` -- today's exact
+			behavior. ``'profile_pearson'`` and ``'count_pearson'`` are
+			load-bearing (they drive early stopping, best-checkpoint
+			selection, and the always-present summary columns) and must
+			stay in the list. Adding ``'profile_jsd'`` computes the
+			Jensen-Shannon distance between the predicted and observed
+			profiles (square root of :func:`cherimoya.performance.
+			jensen_shannon_distance`'s divergence, matching the
+			``scipy.spatial.distance.jensenshannon`` convention ChromBPNet
+			uses) and appends a ``Validation Profile JSD`` summary column
+			plus one ``ProfileJSD_g{i}`` detail column per signal group.
+			Any other measure :func:`calculate_performance_measures`
+			supports can be requested the same way ``'profile_jsd'`` is
+			handled here, one explicit block at a time -- this is not a
+			metric registry.
 		"""
 
 		if X_valid is not None:
@@ -501,6 +521,31 @@ class Cherimoya(torch.nn.Module):
 			X_ctl_valid = (X_ctl_valid,)
 
 		dtype = getattr(torch, dtype) if isinstance(dtype, str) else dtype
+
+		measures = list(measures)
+		compute_jsd = 'profile_jsd' in measures
+
+		# The measures list is a fit()-time choice, but the Logger column
+		# schema is otherwise fixed at construction time (__init__). Rebuild
+		# both loggers from the same base columns __init__ used, plus the
+		# JSD columns if requested -- deterministic on every call, so
+		# calling fit() more than once never double-appends a column, and
+		# the default measures reproduces __init__'s exact schema.
+		summary_columns = ["Epoch", "Iteration", "Training Time",
+			"Validation Time", "Training MNLL", "Training Count MSE",
+			"Validation MNLL", "Validation Profile Pearson",
+			"Validation Count Pearson", "Validation Count MSE", "Saved?"]
+		per_group_columns = (
+			["ProfilePearson_g{}".format(i) for i in range(self.n_groups)]
+			+ ["CountPearson_g{}".format(i) for i in range(self.n_groups)])
+		if compute_jsd:
+			summary_columns = summary_columns + ["Validation Profile JSD"]
+			per_group_columns = per_group_columns + [
+				"ProfileJSD_g{}".format(i) for i in range(self.n_groups)]
+
+		self.logger = Logger(summary_columns, verbose=self.logger.verbose)
+		self.detail_logger = Logger(summary_columns + per_group_columns,
+			verbose=False)
 
 		iteration = 0
 		early_stop_count = 0
@@ -589,18 +634,18 @@ class Cherimoya(torch.nn.Module):
 						y_hat_logits, y_hat_logcounts,
 						signal_groups=self.signal_groups)
 
-					measures = calculate_performance_measures(y_hat_logits,
+					valid_measures = calculate_performance_measures(y_hat_logits,
 						y_valid, y_hat_logcounts,
-						measures=['profile_pearson', 'count_pearson'],
+						measures=measures,
 						signal_groups=self.signal_groups)
 
-					valid_profile_corr = numpy.nan_to_num(measures['profile_pearson'])
-					valid_count_per_group = numpy.nan_to_num(measures['count_pearson'])
+					valid_profile_corr = numpy.nan_to_num(valid_measures['profile_pearson'])
+					valid_count_per_group = numpy.nan_to_num(valid_measures['count_pearson'])
 					valid_count_corr = valid_count_per_group.mean()
 					valid_time = time.time() - tic
 
 					# Per-group profile Pearson. The raw
-					# `measures['profile_pearson']` is shape
+					# `valid_measures['profile_pearson']` is shape
 					# (n_loci, sum(signal_groups)); for each group, average
 					# over its channels and the locus dim so each modality
 					# contributes one number -- a per-group summary like the
@@ -616,6 +661,29 @@ class Cherimoya(torch.nn.Module):
 					valid_profile_corr_mean = float(numpy.mean(
 						per_group_profile_corr))
 
+					if compute_jsd:
+						# `jensen_shannon_distance` returns the JS
+						# *divergence* (no sqrt); its square root is the
+						# JS distance, matching the
+						# `scipy.spatial.distance.jensenshannon` (natural
+						# log, default base) convention ChromBPNet uses.
+						# Clip before sqrt: the divergence is
+						# mathematically >= 0, but floating-point
+						# summation can land a hair below 0 for
+						# near-identical distributions, which would
+						# otherwise turn into a spurious NaN here.
+						valid_profile_jsd = numpy.sqrt(numpy.clip(
+							numpy.nan_to_num(valid_measures['profile_jsd']),
+							0, None))
+						per_group_profile_jsd = []
+						offset = 0
+						for g in self.signal_groups:
+							chunk = valid_profile_jsd[:, offset:offset+g]
+							per_group_profile_jsd.append(float(chunk.mean()))
+							offset += g
+						valid_profile_jsd_mean = float(numpy.mean(
+							per_group_profile_jsd))
+
 					summary_row = [epoch,
 						iteration,
 						train_time,
@@ -627,13 +695,21 @@ class Cherimoya(torch.nn.Module):
 						valid_count_corr,
 						valid_count_loss.mean().item(),
 						(valid_count_corr > best_corr).item()]
-					self.logger.add(summary_row)
-					self.detail_logger.add(summary_row
-						+ per_group_profile_corr
+					if compute_jsd:
+						summary_row = summary_row + [valid_profile_jsd_mean]
+
+					detail_row = (summary_row + per_group_profile_corr
 						+ [float(v) for v in valid_count_per_group.tolist()])
+					if compute_jsd:
+						detail_row = detail_row + per_group_profile_jsd
+
+					self.logger.add(summary_row)
+					self.detail_logger.add(detail_row)
 					_wandb.log_epoch(wandb_run, epoch, self.logger.names,
 						summary_row, per_group_profile_corr,
-						valid_count_per_group.tolist(), signal_group_names)
+						valid_count_per_group.tolist(), signal_group_names,
+						per_group_jsd=(per_group_profile_jsd if compute_jsd
+							else None))
 
 					self.logger.save("{}.log".format(self.name))
 					self.detail_logger.save("{}.detailed.log".format(self.name))
