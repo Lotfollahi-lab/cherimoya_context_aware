@@ -26,6 +26,7 @@ def run(args):
 
     from cherimoya import Cherimoya
     from cherimoya.io import PeakGenerator, normalize_signal_groups
+    from cherimoya.splits import make_split_masks, filter_loci_by_chroms
 
     from tangermeme.io import extract_loci
 
@@ -36,6 +37,50 @@ def run(args):
     parameters = merge_parameters(args.parameters, default_fit_parameters)
     if parameters["skip"]:
         sys.exit()
+
+    # Resolve the train/val/test partition above tangermeme rather than
+    # handing it training_chroms/validation_chroms to filter internally
+    # (tangermeme/io.py:135-136) -- this is what lets "fold"/"precomputed"
+    # express a split that chromosome membership alone can't. train_loci
+    # and val_loci are pre-filtered, so they're passed to PeakGenerator/
+    # extract_loci below with chroms=None; see cherimoya/splits.py.
+    train_loci, val_loci, test_loci = make_split_masks(
+        parameters["loci"],
+        parameters["split_mode"],
+        training_chroms=parameters["training_chroms"],
+        validation_chroms=parameters["validation_chroms"],
+        test_chroms=parameters["test_chroms"],
+        fold_bed=parameters["fold_bed"],
+        val_folds=parameters["val_folds"],
+        test_folds=parameters["test_folds"],
+        split_column=parameters["split_column"],
+    )
+
+    # PeakGenerator applies a single chroms filter to both peaks and
+    # negatives (cherimoya/io.py:629-633) -- there's no separate
+    # negatives-chroms knob. In "chrom" mode we pre-filter negatives the
+    # same way as peaks to keep that coupling's effect identical to
+    # today. In "fold"/"precomputed" mode negatives are passed through
+    # unfiltered -- see the cherimoya.splits module docstring for why.
+    if parameters["split_mode"] == "chrom":
+        train_negatives = filter_loci_by_chroms(
+            parameters["negatives"], parameters["training_chroms"])
+    else:
+        train_negatives = parameters["negatives"]
+
+    # The test partition is never trained or validated on, but it's
+    # written out now (not just logged) so a later evaluate run can
+    # point at the exact loci fit reserved, rather than re-deriving the
+    # split from a source file that may since have changed. val_loci is
+    # written out too -- the auto-evaluate step below reads it back
+    # (chroms=None) instead of re-deriving validation_chroms against the
+    # raw, unfiltered loci, which is only correct for split_mode="chrom".
+    test_loci_path = "{}.test_loci.bed".format(parameters["name"])
+    test_loci.to_csv(test_loci_path, sep="\t", header=False, index=False)
+
+    val_loci_path = "{}.val_loci.bed".format(parameters["name"])
+    val_loci[["chrom", "start", "end"]].to_csv(
+        val_loci_path, sep="\t", header=False, index=False)
 
     # Resolve grouped/flat signal specs into a flat list of files plus
     # the per-group sizes. The flat list is what extract_loci and the
@@ -51,8 +96,11 @@ def run(args):
     control_files, control_groups = normalize_signal_groups(parameters["controls"])
 
     if parameters["verbose"]:
+        print("Split Mode: ", parameters["split_mode"])
         print("Training Chroms: ", parameters["training_chroms"])
         print("Vaidation Chroms: ", parameters["validation_chroms"])
+        print("Test Set Size: ", len(test_loci))
+        print("Test loci written to: ", test_loci_path)
 
         print("\nLoading peaks from: ", parameters["loci"])
         print("Loading negatives from: ", parameters["negatives"])
@@ -65,12 +113,12 @@ def run(args):
     ###
 
     training_data = PeakGenerator(
-        peaks=parameters["loci"],
-        negatives=parameters["negatives"],
+        peaks=train_loci,
+        negatives=train_negatives,
         sequences=parameters["sequences"],
         signals=parameters["signals"],
         controls=parameters["controls"],
-        chroms=parameters["training_chroms"],
+        chroms=None,
         in_window=parameters["in_window"],
         out_window=parameters["out_window"],
         max_jitter=parameters["max_jitter"],
@@ -90,8 +138,8 @@ def run(args):
         sequences=parameters["sequences"],
         signals=signal_files,
         in_signals=control_files,
-        loci=parameters["loci"],
-        chroms=parameters["validation_chroms"],
+        loci=val_loci,
+        chroms=None,
         in_window=parameters["in_window"],
         out_window=parameters["out_window"],
         max_jitter=0,
@@ -264,7 +312,8 @@ def run(args):
     model_name = parameters["name"] or model.name
 
     evaluate_parameters = copy.deepcopy(parameters)
-    evaluate_parameters["chroms"] = parameters["validation_chroms"]
+    evaluate_parameters["loci"] = val_loci_path
+    evaluate_parameters["chroms"] = None
     evaluate_parameters["max_jitter"] = 0
     evaluate_parameters["reverse_complement"] = False
     evaluate_parameters["model"] = model_name + ".torch"
