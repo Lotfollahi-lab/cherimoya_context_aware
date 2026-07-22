@@ -173,10 +173,16 @@ def jensen_shannon_distance(logps, true_counts):
 
 	Computes the Jensen-Shannon distance in the last dimension of `logps` and
 	`true_counts`. These two tensors must be the same shape. For example, if they
-	are both A x B x L arrays, then the KL divergence of corresponding L-arrays
+	are both A x B x L arrays, then the distance of corresponding L-arrays
 	will be computed and returned in an A x B array. This will renormalize the
 	arrays so that each subarray sums to 1. If the sum of a subarray is 0, then
 	the resulting JSD will be NaN.
+
+	This is the square root of the Jensen-Shannon divergence,
+	``sqrt(0.5*(KL(P||M) + KL(Q||M)))``, in natural-log units (no base
+	rescale) -- the same quantity and convention
+	``scipy.spatial.distance.jensenshannon`` returns with its default
+	``base=None``. Bounded ``[0, sqrt(ln 2)]`` (~0.833).
 
 
 	Parameters
@@ -191,7 +197,7 @@ def jensen_shannon_distance(logps, true_counts):
 	Returns
 	-------
 	jsd: torch.Tensor
-		The Jensen-Shannon divergence for each element.
+		The Jensen-Shannon distance for each element, in ``[0, sqrt(ln 2)]``.
 	"""
 	# Renormalize both distributions, and if the sum is NaN, put NaNs all around
 
@@ -204,7 +210,12 @@ def jensen_shannon_distance(logps, true_counts):
 	probs2 = probs2.type(probs1.dtype)
 
 	mid = 0.5 * (probs1 + probs2)
-	return 0.5 * (_kl_divergence(probs1, mid) + _kl_divergence(probs2, mid))
+	divergence = 0.5 * (_kl_divergence(probs1, mid) + _kl_divergence(probs2, mid))
+
+	# The divergence is mathematically >= 0, but floating-point summation
+	# can land a hair below 0 for near-identical distributions -- clip
+	# before sqrt so that case returns 0 rather than NaN.
+	return torch.sqrt(torch.clamp(divergence, min=0))
 
 
 def pearson_corr(arr1, arr2):
@@ -321,7 +332,7 @@ def calculate_performance_measures(logps, true_counts, pred_log_counts,
 
 	- ``profile_mnll``: the multinomial log-likelihood of the observed
 	  profile given the predicted logits.
-	- ``profile_jsd``: the Jensen-Shannon divergence between the observed
+	- ``profile_jsd``: the Jensen-Shannon distance between the observed
 	  profile and the predicted probabilities.
 	- ``profile_pearson``: the Pearson correlation between the observed
 	  profile and the predicted probabilities.

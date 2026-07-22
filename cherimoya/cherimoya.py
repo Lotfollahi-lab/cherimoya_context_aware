@@ -503,11 +503,11 @@ class Cherimoya(torch.nn.Module):
 			selection, and the always-present summary columns) and must
 			stay in the list. Adding ``'profile_jsd'`` computes the
 			Jensen-Shannon distance between the predicted and observed
-			profiles (square root of :func:`cherimoya.performance.
-			jensen_shannon_distance`'s divergence, matching the
-			``scipy.spatial.distance.jensenshannon`` convention ChromBPNet
-			uses) and appends a ``Validation Profile JSD`` summary column
-			plus one ``ProfileJSD_g{i}`` detail column per signal group.
+			profiles (:func:`cherimoya.performance.jensen_shannon_distance`,
+			natural log, matching the ``scipy.spatial.distance.
+			jensenshannon`` convention ChromBPNet uses) and appends a
+			``Validation Profile JSD`` summary column plus one
+			``ProfileJSD_g{i}`` detail column per signal group.
 			Any other measure :func:`calculate_performance_measures`
 			supports can be requested the same way ``'profile_jsd'`` is
 			handled here, one explicit block at a time -- this is not a
@@ -662,19 +662,15 @@ class Cherimoya(torch.nn.Module):
 						per_group_profile_corr))
 
 					if compute_jsd:
-						# `jensen_shannon_distance` returns the JS
-						# *divergence* (no sqrt); its square root is the
-						# JS distance, matching the
-						# `scipy.spatial.distance.jensenshannon` (natural
-						# log, default base) convention ChromBPNet uses.
-						# Clip before sqrt: the divergence is
-						# mathematically >= 0, but floating-point
-						# summation can land a hair below 0 for
-						# near-identical distributions, which would
-						# otherwise turn into a spurious NaN here.
-						valid_profile_jsd = numpy.sqrt(numpy.clip(
-							numpy.nan_to_num(valid_measures['profile_jsd']),
-							0, None))
+						# `jensen_shannon_distance` already returns the JS
+						# *distance* (natural log, matching the
+						# `scipy.spatial.distance.jensenshannon` default
+						# convention ChromBPNet uses) -- nan_to_num here
+						# only to keep this aggregation safe the same way
+						# valid_profile_corr/valid_count_per_group above
+						# are, for a zero-sum (empty-peak) locus.
+						valid_profile_jsd = numpy.nan_to_num(
+							valid_measures['profile_jsd'])
 						per_group_profile_jsd = []
 						offset = 0
 						for g in self.signal_groups:
