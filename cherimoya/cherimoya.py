@@ -11,6 +11,7 @@ import numpy
 
 import torch
 
+from . import _wandb
 from .cheri import CheriBlock
 from .io import _validate_signal_groups
 from .losses import _mixture_loss
@@ -396,7 +397,7 @@ class Cherimoya(torch.nn.Module):
 	def fit(self, training_data, muon_optimizer, adam_optimizer, lw_optimizer,
 		muon_scheduler, adam_scheduler, lw_scheduler, X_valid, X_ctl_valid,
 		y_valid, max_epochs=50, batch_size=64, dtype='float32', device='cuda',
-		early_stopping=None):
+		early_stopping=None, wandb_config=None, signal_group_names=None):
 		"""Fit the model to data and validate it periodically.
 
 		This method controls the training of a Cherimoya model. It will fit
@@ -476,6 +477,21 @@ class Cherimoya(torch.nn.Module):
 			max_epochs is reached. If an integer, continue training until that
 			number of epochs has been hit without improvement in performance.
 			Default is None.
+
+		wandb_config: dict or None, optional
+			If given, mirror each epoch's metrics to Weights & Biases
+			alongside the existing disk logs (see :mod:`cherimoya._wandb`).
+			Keys ``project``, ``name``, ``entity``, ``tags``, ``mode``, and
+			``config`` are all optional. If None (the default), wandb is
+			never imported and disk logging is unaffected. Any failure to
+			authenticate or initialize soft-fails to disk-only logging
+			rather than raising.
+
+		signal_group_names: list of str or None, optional
+			A human-readable label per signal group, same length as
+			``self.signal_groups``, used only to name per-group series in
+			wandb. If None, groups are labeled generically (``group_0``,
+			``group_1``, ...). Has no effect when ``wandb_config`` is None.
 		"""
 
 		if X_valid is not None:
@@ -494,134 +510,146 @@ class Cherimoya(torch.nn.Module):
 
 		ema = EMA(self, decay=0.999)
 
+		# wandb is entirely opt-in: None (the default) means _wandb.init
+		# is never called and wandb is never imported. Any failure to
+		# authenticate/initialize soft-fails to wandb_run=None, so the
+		# epoch loop below always logs to disk regardless.
+		wandb_run = _wandb.init(wandb_config) if wandb_config else None
+
 		###
 
-		for epoch in range(max_epochs):
-			tic = time.time()
-
-			for data in training_data:
-				X, y, labels = data[0], data[-2], data[-1]
-				X_ctl = data[1].to(device) if len(data) == 4 else None
-
-				if X.shape[0] != batch_size:
-					continue
-
-				X = X.to(device).float()
-				y = y.to(device)
-
-				# Clear the optimizer and set the model to training mode
-				muon_optimizer.zero_grad()
-				adam_optimizer.zero_grad()
-				lw_optimizer.zero_grad()
-				self.train()
-
-				# Make one training step
-				with torch.autocast(device_type=device, dtype=dtype):
-					y_hat_logits, y_hat_logcounts = self(X, X_ctl)
-
-				profile_loss, count_loss = _mixture_loss(y,
-					y_hat_logits.float(), y_hat_logcounts.float(),
-					signal_groups=self.signal_groups)
-
-
-				w0 = (1.0 / (2.0 * self.lw0 ** 2))
-				w1 = (1.0 / (2.0 * self.lw1 ** 2))
-				loss = (w0 * profile_loss).sum() + (w1 * count_loss).sum()
-
-				if self.lw0.requires_grad == True:
-					loss += (torch.log(self.lw0) ** 2).sum()
-					loss += (torch.log(self.lw1) ** 2).sum()
-
-				loss.backward()
-
-				muon_optimizer.step()
-				adam_optimizer.step()
-				lw_optimizer.step()
-
-				muon_scheduler.step()
-				adam_scheduler.step()
-				lw_scheduler.step()
-
-				ema.update(self)
-
-				iteration += 1
-
-			train_time = time.time() - tic
-
-			if self.lw0.requires_grad == True and torch.abs(self.lw0.grad).mean() < 1:
-				self.lw0.requires_grad = False
-				self.lw1.requires_grad = False
-
-			# Validate the model at the end of the epoch
-			with torch.no_grad():
-				self.eval()
-				ema.apply_shadow(self)
-
+		try:
+			for epoch in range(max_epochs):
 				tic = time.time()
 
-				y_hat_logits, y_hat_logcounts = predict(self, X_valid, args=X_ctl_valid,
-					batch_size=batch_size, dtype=dtype, device=device)
+				for data in training_data:
+					X, y, labels = data[0], data[-2], data[-1]
+					X_ctl = data[1].to(device) if len(data) == 4 else None
 
-				valid_profile_loss, valid_count_loss = _mixture_loss(y_valid,
-					y_hat_logits, y_hat_logcounts,
-					signal_groups=self.signal_groups)
+					if X.shape[0] != batch_size:
+						continue
 
-				measures = calculate_performance_measures(y_hat_logits,
-					y_valid, y_hat_logcounts,
-					measures=['profile_pearson', 'count_pearson'],
-					signal_groups=self.signal_groups)
+					X = X.to(device).float()
+					y = y.to(device)
 
-				valid_profile_corr = numpy.nan_to_num(measures['profile_pearson'])
-				valid_count_per_group = numpy.nan_to_num(measures['count_pearson'])
-				valid_count_corr = valid_count_per_group.mean()
-				valid_time = time.time() - tic
+					# Clear the optimizer and set the model to training mode
+					muon_optimizer.zero_grad()
+					adam_optimizer.zero_grad()
+					lw_optimizer.zero_grad()
+					self.train()
 
-				# Per-group profile Pearson. The raw
-				# `measures['profile_pearson']` is shape
-				# (n_loci, sum(signal_groups)); for each group, average
-				# over its channels and the locus dim so each modality
-				# contributes one number -- a per-group summary like the
-				# count Pearson. The Pearson metric stays per-channel and
-				# is scale-invariant, so this channel-average is unaffected
-				# by the loss's joint per-group normalization.
-				per_group_profile_corr = []
-				offset = 0
-				for g in self.signal_groups:
-					chunk = valid_profile_corr[:, offset:offset+g]
-					per_group_profile_corr.append(float(chunk.mean()))
-					offset += g
-				valid_profile_corr_mean = float(numpy.mean(
-					per_group_profile_corr))
+					# Make one training step
+					with torch.autocast(device_type=device, dtype=dtype):
+						y_hat_logits, y_hat_logcounts = self(X, X_ctl)
 
-				summary_row = [epoch,
-					iteration,
-					train_time,
-					valid_time,
-					profile_loss.mean().item(),
-					count_loss.mean().item(),
-					valid_profile_loss.mean().item(),
-					valid_profile_corr_mean,
-					valid_count_corr,
-					valid_count_loss.mean().item(),
-					(valid_count_corr > best_corr).item()]
-				self.logger.add(summary_row)
-				self.detail_logger.add(summary_row
-					+ per_group_profile_corr
-					+ [float(v) for v in valid_count_per_group.tolist()])
+					profile_loss, count_loss = _mixture_loss(y,
+						y_hat_logits.float(), y_hat_logcounts.float(),
+						signal_groups=self.signal_groups)
 
-				self.logger.save("{}.log".format(self.name))
-				self.detail_logger.save("{}.detailed.log".format(self.name))
 
-				if valid_count_corr > best_corr:
-					self.save("{}.torch".format(self.name))
-					best_corr = valid_count_corr
-					early_stop_count = -1
+					w0 = (1.0 / (2.0 * self.lw0 ** 2))
+					w1 = (1.0 / (2.0 * self.lw1 ** 2))
+					loss = (w0 * profile_loss).sum() + (w1 * count_loss).sum()
 
-				ema.restore(self)
+					if self.lw0.requires_grad == True:
+						loss += (torch.log(self.lw0) ** 2).sum()
+						loss += (torch.log(self.lw1) ** 2).sum()
 
-			early_stop_count += 1
-			if early_stopping is not None and early_stop_count >= early_stopping:
-				break
+					loss.backward()
+
+					muon_optimizer.step()
+					adam_optimizer.step()
+					lw_optimizer.step()
+
+					muon_scheduler.step()
+					adam_scheduler.step()
+					lw_scheduler.step()
+
+					ema.update(self)
+
+					iteration += 1
+
+				train_time = time.time() - tic
+
+				if self.lw0.requires_grad == True and torch.abs(self.lw0.grad).mean() < 1:
+					self.lw0.requires_grad = False
+					self.lw1.requires_grad = False
+
+				# Validate the model at the end of the epoch
+				with torch.no_grad():
+					self.eval()
+					ema.apply_shadow(self)
+
+					tic = time.time()
+
+					y_hat_logits, y_hat_logcounts = predict(self, X_valid, args=X_ctl_valid,
+						batch_size=batch_size, dtype=dtype, device=device)
+
+					valid_profile_loss, valid_count_loss = _mixture_loss(y_valid,
+						y_hat_logits, y_hat_logcounts,
+						signal_groups=self.signal_groups)
+
+					measures = calculate_performance_measures(y_hat_logits,
+						y_valid, y_hat_logcounts,
+						measures=['profile_pearson', 'count_pearson'],
+						signal_groups=self.signal_groups)
+
+					valid_profile_corr = numpy.nan_to_num(measures['profile_pearson'])
+					valid_count_per_group = numpy.nan_to_num(measures['count_pearson'])
+					valid_count_corr = valid_count_per_group.mean()
+					valid_time = time.time() - tic
+
+					# Per-group profile Pearson. The raw
+					# `measures['profile_pearson']` is shape
+					# (n_loci, sum(signal_groups)); for each group, average
+					# over its channels and the locus dim so each modality
+					# contributes one number -- a per-group summary like the
+					# count Pearson. The Pearson metric stays per-channel and
+					# is scale-invariant, so this channel-average is unaffected
+					# by the loss's joint per-group normalization.
+					per_group_profile_corr = []
+					offset = 0
+					for g in self.signal_groups:
+						chunk = valid_profile_corr[:, offset:offset+g]
+						per_group_profile_corr.append(float(chunk.mean()))
+						offset += g
+					valid_profile_corr_mean = float(numpy.mean(
+						per_group_profile_corr))
+
+					summary_row = [epoch,
+						iteration,
+						train_time,
+						valid_time,
+						profile_loss.mean().item(),
+						count_loss.mean().item(),
+						valid_profile_loss.mean().item(),
+						valid_profile_corr_mean,
+						valid_count_corr,
+						valid_count_loss.mean().item(),
+						(valid_count_corr > best_corr).item()]
+					self.logger.add(summary_row)
+					self.detail_logger.add(summary_row
+						+ per_group_profile_corr
+						+ [float(v) for v in valid_count_per_group.tolist()])
+					_wandb.log_epoch(wandb_run, epoch, self.logger.names,
+						summary_row, per_group_profile_corr,
+						valid_count_per_group.tolist(), signal_group_names)
+
+					self.logger.save("{}.log".format(self.name))
+					self.detail_logger.save("{}.detailed.log".format(self.name))
+
+					if valid_count_corr > best_corr:
+						self.save("{}.torch".format(self.name))
+						best_corr = valid_count_corr
+						early_stop_count = -1
+
+					ema.restore(self)
+
+				early_stop_count += 1
+				if early_stopping is not None and early_stop_count >= early_stopping:
+					break
+		finally:
+			_wandb.finish(wandb_run)
 
 		ema.apply_shadow(self)
 		self.save("{}.final.torch".format(self.name))
