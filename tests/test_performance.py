@@ -89,13 +89,12 @@ def test_jsd_zero_for_identical_distributions():
 	assert torch.allclose(jsd.squeeze(), torch.tensor(0.0), atol=1e-5)
 
 
-def test_jsd_sqrt_matches_scipy_jensenshannon_distance():
+def test_jsd_matches_scipy_jensenshannon_distance():
 	"""cherimoya.performance.jensen_shannon_distance returns the JS
-	*divergence* (no sqrt), despite its name. fit()'s measures='profile_jsd'
-	path takes its square root to get the JS *distance*, matching
-	scipy.spatial.distance.jensenshannon's default (natural log) convention
-	-- the same one ChromBPNet uses. Pin that conversion against scipy
-	directly, for both a near-zero case and the near-disjoint case."""
+	*distance* (sqrt already applied internally), matching
+	scipy.spatial.distance.jensenshannon's default (natural log)
+	convention -- the same one ChromBPNet uses. Pin it against scipy
+	directly for a near-disjoint case."""
 
 	from scipy.spatial.distance import jensenshannon
 
@@ -105,27 +104,25 @@ def test_jsd_sqrt_matches_scipy_jensenshannon_distance():
 	logits = torch.log(torch.tensor(p, dtype=torch.float64)).reshape(1, 1, 3)
 	counts = torch.tensor(q, dtype=torch.float64).reshape(1, 1, 3)
 
-	divergence = jensen_shannon_distance(logits, counts)
-	distance = torch.sqrt(divergence)
+	distance = jensen_shannon_distance(logits, counts)
 
 	expected = jensenshannon(p, q)
 	assert torch.allclose(distance.squeeze(), torch.tensor(expected), atol=1e-4)
 
 
-def test_jsd_distance_near_zero_for_near_identical_distributions():
+def test_jsd_near_zero_for_near_identical_distributions():
 	p = numpy.array([0.4, 0.3, 0.3])
 	logits = torch.log(torch.tensor(p, dtype=torch.float64)).reshape(1, 1, 3)
 	counts = torch.tensor(p, dtype=torch.float64).reshape(1, 1, 3)
 
-	divergence = jensen_shannon_distance(logits, counts)
-	distance = torch.sqrt(torch.clamp(divergence, min=0))
+	distance = jensen_shannon_distance(logits, counts)
 	assert distance.item() < 1e-4
 
 
-def test_jsd_distance_bounded_for_disjoint_distributions():
-	"""The JS distance (sqrt of the divergence, natural log) is bounded
-	by sqrt(ln 2) ~ 0.8326 -- disjoint distributions should land close to
-	that upper bound, and stay within [0, 1]."""
+def test_jsd_bounded_for_disjoint_distributions():
+	"""The JS distance (natural log) is bounded by sqrt(ln 2) ~ 0.8326 --
+	disjoint distributions should land close to that upper bound, and
+	stay within [0, 1]."""
 
 	import math
 
@@ -134,8 +131,7 @@ def test_jsd_distance_bounded_for_disjoint_distributions():
 	logits = torch.log(torch.tensor(p, dtype=torch.float64)).reshape(1, 1, 2)
 	counts = torch.tensor(q, dtype=torch.float64).reshape(1, 1, 2)
 
-	divergence = jensen_shannon_distance(logits, counts)
-	distance = torch.sqrt(torch.clamp(divergence, min=0)).item()
+	distance = jensen_shannon_distance(logits, counts).item()
 
 	assert 0.0 <= distance <= 1.0
 	assert abs(distance - math.sqrt(math.log(2))) < 1e-3
