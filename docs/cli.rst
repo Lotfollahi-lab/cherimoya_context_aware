@@ -364,6 +364,21 @@ Unspecified keys fall back to the fit-level defaults.
        labels are derived from each group's first signal file's
        basename, falling back to generic ``group_0``, ``group_1``, ...
        if that would collide.
+   * - ``measures``
+     - ``["profile_pearson", "count_pearson"]``
+     - Which measures the per-epoch validation computes (see
+       :func:`cherimoya.performance.calculate_performance_measures` for
+       the full set). The default is today's exact behavior;
+       ``"profile_pearson"``/``"count_pearson"`` must stay in the list
+       (they drive early stopping and best-checkpoint selection). Adding
+       ``"profile_jsd"`` computes the Jensen-Shannon distance between
+       predicted and observed profiles (:func:`jensen_shannon_distance`,
+       natural log, no ``base=`` override, bounded ``[0, sqrt(ln 2)]``
+       ~0.833) -- matching the ``scipy.spatial.distance.jensenshannon``
+       convention ChromBPNet uses, so its ~0.62-ish figures are on the
+       same scale -- and appends a ``Validation Profile JSD`` summary
+       column plus one ``ProfileJSD_g{i}`` detail column per signal
+       group (also mirrored to wandb when configured).
 
 
 attribute_parameters
