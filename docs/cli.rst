@@ -372,13 +372,13 @@ Unspecified keys fall back to the fit-level defaults.
        ``"profile_pearson"``/``"count_pearson"`` must stay in the list
        (they drive early stopping and best-checkpoint selection). Adding
        ``"profile_jsd"`` computes the Jensen-Shannon distance between
-       predicted and observed profiles -- the square root of
-       :func:`jensen_shannon_distance`'s divergence, natural log, no
-       ``base=`` override -- matching the
-       ``scipy.spatial.distance.jensenshannon`` convention ChromBPNet
-       uses, and appends a ``Validation Profile JSD`` summary column
-       plus one ``ProfileJSD_g{i}`` detail column per signal group
-       (also mirrored to wandb when configured).
+       predicted and observed profiles (:func:`jensen_shannon_distance`,
+       natural log, no ``base=`` override, bounded ``[0, sqrt(ln 2)]``
+       ~0.833) -- matching the ``scipy.spatial.distance.jensenshannon``
+       convention ChromBPNet uses, so its ~0.62-ish figures are on the
+       same scale -- and appends a ``Validation Profile JSD`` summary
+       column plus one ``ProfileJSD_g{i}`` detail column per signal
+       group (also mirrored to wandb when configured).
 
 
 attribute_parameters
