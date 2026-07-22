@@ -105,6 +105,34 @@ def test_log_epoch_soft_fails_on_run_log_exception():
 	_wandb.log_epoch(_Boom(), 0, ["Epoch"], [0], [], [])  # must not raise
 
 
+def test_log_epoch_per_group_jsd_absent_by_default():
+	"""per_group_jsd=None (the default) -> no val/profile_jsd/* keys at
+	all, mirroring how the JSD summary/detail columns are absent unless
+	requested."""
+
+	run = _FakeRun()
+	_wandb.log_epoch(run, 0, ["Epoch"], [0], [0.5], [0.1])
+	_, payload = run.logged[0]
+	assert not any(k.startswith("val/profile_jsd/") for k in payload)
+
+
+def test_log_epoch_per_group_jsd_included_when_given():
+	run = _FakeRun()
+	_wandb.log_epoch(run, 0, ["Epoch"], [0], [0.5, 0.6], [0.1, 0.2],
+		per_group_jsd=[0.2, 0.3])
+	_, payload = run.logged[0]
+	assert payload["val/profile_jsd/group_0"] == 0.2
+	assert payload["val/profile_jsd/group_1"] == 0.3
+
+
+def test_log_epoch_per_group_jsd_uses_signal_group_names():
+	run = _FakeRun()
+	_wandb.log_epoch(run, 0, ["Epoch"], [0], [0.5], [0.1],
+		signal_group_names=["B_cell"], per_group_jsd=[0.2])
+	_, payload = run.logged[0]
+	assert payload["val/profile_jsd/B_cell"] == 0.2
+
+
 # --------- init ---------------------------------------------------------------
 
 def test_init_returns_none_when_wandb_not_installed(monkeypatch):
@@ -335,6 +363,69 @@ def test_fit_wandb_uses_signal_group_names(tmp_path, monkeypatch):
 	assert "val/profile_pearson/alpha" in payload
 	assert "val/profile_pearson/beta" in payload
 	assert "val/profile_pearson/group_0" not in payload
+
+
+def test_fit_wandb_jsd_absent_when_not_requested(tmp_path, monkeypatch):
+	"""Default measures (no 'profile_jsd') -> no val/profile_jsd/* keys
+	reach wandb, end to end through the real fit() call -- not just the
+	log_epoch unit tests above."""
+
+	fake_run = _FakeRun()
+	monkeypatch.setattr(_wandb, "init", lambda cfg: fake_run)
+
+	setup = _tiny_fit_setup(tmp_path, [1])
+	model = setup.pop("model")
+
+	import os
+	cwd = os.getcwd()
+	os.chdir(tmp_path)
+	try:
+		model.fit(setup["training_data"], setup["muon_optimizer"],
+			setup["adam_optimizer"], setup["lw_optimizer"],
+			setup["muon_scheduler"], setup["adam_scheduler"],
+			setup["lw_scheduler"], X_valid=setup["X_valid"],
+			X_ctl_valid=setup["X_ctl_valid"], y_valid=setup["y_valid"],
+			max_epochs=1, batch_size=4, dtype='float32', device='cpu',
+			early_stopping=None, wandb_config={"project": "p"})
+	finally:
+		os.chdir(cwd)
+
+	_, payload = fake_run.logged[0]
+	assert not any(k.startswith("val/profile_jsd/") for k in payload)
+	assert "Validation Profile JSD" not in payload
+
+
+def test_fit_wandb_jsd_included_when_requested(tmp_path, monkeypatch):
+	"""measures including 'profile_jsd' -> the summary JSD-mean column
+	(via the schema-zip, zero _wandb.py awareness needed) AND the
+	per-group val/profile_jsd/* keys (via the explicit per_group_jsd
+	param) both reach the wandb payload."""
+
+	fake_run = _FakeRun()
+	monkeypatch.setattr(_wandb, "init", lambda cfg: fake_run)
+
+	setup = _tiny_fit_setup(tmp_path, [1, 1])
+	model = setup.pop("model")
+
+	import os
+	cwd = os.getcwd()
+	os.chdir(tmp_path)
+	try:
+		model.fit(setup["training_data"], setup["muon_optimizer"],
+			setup["adam_optimizer"], setup["lw_optimizer"],
+			setup["muon_scheduler"], setup["adam_scheduler"],
+			setup["lw_scheduler"], X_valid=setup["X_valid"],
+			X_ctl_valid=setup["X_ctl_valid"], y_valid=setup["y_valid"],
+			max_epochs=1, batch_size=4, dtype='float32', device='cpu',
+			early_stopping=None, wandb_config={"project": "p"},
+			measures=['profile_pearson', 'count_pearson', 'profile_jsd'])
+	finally:
+		os.chdir(cwd)
+
+	_, payload = fake_run.logged[0]
+	assert "Validation Profile JSD" in payload
+	assert "val/profile_jsd/group_0" in payload
+	assert "val/profile_jsd/group_1" in payload
 
 
 def test_fit_wandb_finish_called_even_on_exception(tmp_path, monkeypatch):

@@ -713,3 +713,157 @@ def test_model_no_grad_stable_across_repeated_calls_cuda():
 	assert torch.equal(c1, c2)
 	assert torch.equal(p1, p3)
 	assert torch.equal(c1, c3)
+
+
+# --------- fit() measures / profile_jsd ------------------------------------
+
+def _fit_tiny_model(tmp_path, signal_groups, measures, max_epochs=2, model=None):
+	"""Smallest possible fit() run, parametrized over signal_groups and
+	measures -- shared setup for the measures/profile_jsd tests below.
+	Mirrors test_grouped_model_fit_smoke's synthetic-data harness. Pass
+	an existing ``model`` to fit it a second time (e.g. to test that a
+	repeat fit() call doesn't double-append Logger columns)."""
+
+	import os
+	from torch.optim import Muon
+	from torch.optim.lr_scheduler import LinearLR
+	from cherimoya.io import PeakNegativeSampler, channel_permutation_from_groups
+
+	n_outputs = sum(signal_groups)
+	if model is None:
+		model = Cherimoya(n_filters=8, n_layers=2, signal_groups=signal_groups,
+			verbose=False, compile=False)
+	model.name = str(tmp_path / "smoke")
+
+	L = _input_window_for(model)
+	out_L = L - 2 * model.trimming
+
+	g = torch.Generator().manual_seed(0)
+	n_peaks, n_negs = 8, 4
+	peak_sequences = torch.zeros(n_peaks, 4, L)
+	peak_sequences[:, 0, :] = 1.0
+	peak_signals = torch.randint(0, 5, (n_peaks, n_outputs, out_L),
+		generator=g).float()
+	neg_sequences = torch.zeros(n_negs, 4, L)
+	neg_sequences[:, 0, :] = 1.0
+	neg_signals = torch.zeros(n_negs, n_outputs, out_L)
+
+	sampler = PeakNegativeSampler(
+		peak_sequences=peak_sequences, peak_signals=peak_signals,
+		negative_sequences=neg_sequences, negative_signals=neg_signals,
+		in_window=L, out_window=out_L, max_jitter=0,
+		negative_ratio=0, random_state=0, reverse_complement=True,
+		signal_perm=channel_permutation_from_groups(signal_groups))
+	training_data = torch.utils.data.DataLoader(sampler, batch_size=4,
+		num_workers=0)
+
+	muon_params, adam_params, lw_params = [], [], []
+	for name, p in model.named_parameters():
+		if name in ("lw0", "lw1"):
+			lw_params.append(p)
+		elif (p.ndim == 2 and "weight" in name and name != "linear.weight"
+				and "conv_weight" not in name):
+			muon_params.append(p)
+		else:
+			adam_params.append(p)
+	muon_opt = Muon(muon_params, lr=1e-3, weight_decay=0.0)
+	adam_opt = torch.optim.AdamW(adam_params, lr=1e-3, weight_decay=0.0)
+	lw_opt = torch.optim.SGD(lw_params, lr=1e-3, weight_decay=0.0, momentum=0.9)
+	muon_sched = LinearLR(muon_opt, start_factor=1.0, total_iters=1)
+	adam_sched = LinearLR(adam_opt, start_factor=1.0, total_iters=1)
+	lw_sched = LinearLR(lw_opt, start_factor=1.0, total_iters=1)
+
+	X_valid = torch.zeros(4, 4, L)
+	X_valid[:, 0, :] = 1.0
+	y_valid = torch.randint(0, 5, (4, n_outputs, out_L), generator=g).float()
+
+	cwd = os.getcwd()
+	os.chdir(tmp_path)
+	try:
+		model.fit(training_data, muon_opt, adam_opt, lw_opt, muon_sched,
+			adam_sched, lw_sched, X_valid=X_valid, X_ctl_valid=None,
+			y_valid=y_valid, max_epochs=max_epochs, batch_size=4,
+			dtype='float32', device='cpu', early_stopping=None,
+			measures=measures)
+	finally:
+		os.chdir(cwd)
+
+	return model
+
+
+def test_default_measures_reproduces_current_schema(tmp_path):
+	"""The default measures=('profile_pearson', 'count_pearson') must
+	leave the Logger schema exactly as __init__ built it -- no JSD
+	columns, zero behavior change from before this option existed."""
+
+	model = Cherimoya(n_filters=8, n_layers=2, signal_groups=[1],
+		verbose=False, compile=False)
+	original_summary_names = list(model.logger.names)
+	original_detail_names = list(model.detail_logger.names)
+
+	fitted = _fit_tiny_model(tmp_path, [1],
+		measures=('profile_pearson', 'count_pearson'))
+
+	assert fitted.logger.names == original_summary_names
+	assert fitted.detail_logger.names == original_detail_names
+	assert "Validation Profile JSD" not in fitted.logger.names
+	assert not any(n.startswith("ProfileJSD_") for n in fitted.detail_logger.names)
+
+
+def test_jsd_measure_adds_summary_and_detail_columns(tmp_path):
+	model = _fit_tiny_model(tmp_path, [1, 1],
+		measures=['profile_pearson', 'count_pearson', 'profile_jsd'])
+
+	assert "Validation Profile JSD" in model.logger.names
+	assert "ProfileJSD_g0" in model.detail_logger.names
+	assert "ProfileJSD_g1" in model.detail_logger.names
+
+
+def test_jsd_values_are_bounded(tmp_path):
+	"""JSD is a bounded distance (sqrt of a JS divergence bounded by
+	ln 2) -- values must land in [0, 1] regardless of input."""
+
+	model = _fit_tiny_model(tmp_path, [1, 1],
+		measures=['profile_pearson', 'count_pearson', 'profile_jsd'])
+
+	summary_log = tmp_path / "smoke.log"
+	detail_log = tmp_path / "smoke.detailed.log"
+	import pandas
+	summary_df = pandas.read_csv(summary_log, sep="\t")
+	detail_df = pandas.read_csv(detail_log, sep="\t")
+
+	assert summary_df["Validation Profile JSD"].between(0, 1).all()
+	assert detail_df["ProfileJSD_g0"].between(0, 1).all()
+	assert detail_df["ProfileJSD_g1"].between(0, 1).all()
+
+
+@pytest.mark.parametrize("signal_groups", [[1], [1, 1], [1, 1, 1]])
+def test_jsd_is_group_count_agnostic(tmp_path, signal_groups):
+	"""Must produce exactly len(signal_groups) JSD columns, not a
+	hardcoded count."""
+
+	model = _fit_tiny_model(tmp_path, signal_groups,
+		measures=['profile_pearson', 'count_pearson', 'profile_jsd'])
+
+	jsd_columns = [n for n in model.detail_logger.names
+		if n.startswith("ProfileJSD_g")]
+	assert len(jsd_columns) == len(signal_groups)
+
+
+def test_fit_can_be_called_twice_without_duplicating_jsd_columns(tmp_path):
+	"""Logger schema is rebuilt from constants on every fit() call, not
+	appended to whatever it currently is -- calling fit() a second time
+	on the SAME model instance (e.g. continued training) must not double
+	the JSD columns."""
+
+	model = _fit_tiny_model(tmp_path, [1],
+		measures=['profile_pearson', 'count_pearson', 'profile_jsd'],
+		max_epochs=1)
+	first_names = list(model.detail_logger.names)
+
+	model = _fit_tiny_model(tmp_path, [1],
+		measures=['profile_pearson', 'count_pearson', 'profile_jsd'],
+		max_epochs=1, model=model)
+
+	assert model.detail_logger.names == first_names
+	assert model.detail_logger.names.count("ProfileJSD_g0") == 1
