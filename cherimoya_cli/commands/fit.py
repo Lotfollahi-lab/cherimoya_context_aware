@@ -358,6 +358,7 @@ def run(args):
         device=parameters["device"],
         wandb_config=wandb_config,
         signal_group_names=signal_group_names,
+        measures=parameters["measures"],
     )
 
     ### Evaluate Model

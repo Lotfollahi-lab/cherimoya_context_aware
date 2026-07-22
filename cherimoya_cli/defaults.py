@@ -82,6 +82,7 @@ default_fit_parameters = {
 	'wandb_tags': [],
 	'wandb_mode': None,
 	'wandb_group_names': None,
+	'measures': ['profile_pearson', 'count_pearson'],
 }
 
 
@@ -264,6 +265,7 @@ default_pipeline_parameters = {
 		'wandb_tags': [],
 		'wandb_mode': None,
 		'wandb_group_names': None,
+		'measures': ['profile_pearson', 'count_pearson'],
 	},
 
 	# Attribution parameters
