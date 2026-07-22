@@ -343,6 +343,27 @@ Unspecified keys fall back to the fit-level defaults.
    * - ``random_state``
      - ``null``
      - Base RNG seed.
+   * - ``wandb_project``
+     - ``null``
+     - Weights & Biases project. ``null`` disables wandb entirely --
+       training logs to disk only, unchanged from before this option
+       existed. Requires ``WANDB_API_KEY`` (env, or ``~/.netrc``'s
+       ``api.wandb.ai`` entry); any auth or ``wandb.init`` failure
+       soft-falls back to disk-only logging.
+   * - ``wandb_name`` / ``wandb_entity`` / ``wandb_mode``
+     - ``null``
+     - Optional ``wandb.init`` overrides. Ignored when ``wandb_project``
+       is ``null``.
+   * - ``wandb_tags``
+     - ``[]``
+     - Optional list of wandb tags.
+   * - ``wandb_group_names``
+     - ``null``
+     - Optional label per signal group (same order as ``signals``), used
+       to name per-celltype/per-modality series in wandb. If ``null``,
+       labels are derived from each group's first signal file's
+       basename, falling back to generic ``group_0``, ``group_1``, ...
+       if that would collide.
 
 
 attribute_parameters

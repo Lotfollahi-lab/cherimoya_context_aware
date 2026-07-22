@@ -2,6 +2,39 @@
 # Author: Jacob Schreiber <jmschreiber91@gmail.com>
 
 
+def _resolve_group_names(signal_files, signal_groups, explicit_names):
+    """Resolve one label per signal group, for wandb's per-group series.
+
+    ``explicit_names`` (``parameters["wandb_group_names"]``) always wins
+    when given. Otherwise, derive a label per group from the first
+    channel's file basename (minus extension) -- fit.py has no manifest
+    concept (that's a train/loop.py-only convention), so the signal file
+    list, already in group order via ``normalize_signal_groups``, is the
+    only name-bearing thing available. Falls back to None (letting
+    ``Cherimoya.fit`` label groups generically as ``group_0``, ``group_1``,
+    ...) if there are no signals, or if two groups would derive the same
+    label -- a silent collision would merge two celltypes' wandb series.
+    """
+
+    if explicit_names:
+        return explicit_names
+    if not signal_files:
+        return None
+
+    import os
+
+    names = []
+    offset = 0
+    for g in signal_groups:
+        stem = os.path.splitext(os.path.basename(signal_files[offset]))[0]
+        names.append(stem)
+        offset += g
+
+    if len(names) != len(set(names)):
+        return None
+    return names
+
+
 def run(args):
     import argparse
     import copy
@@ -94,6 +127,24 @@ def run(args):
     # evaluate step.
     signal_files, signal_groups = normalize_signal_groups(parameters["signals"])
     control_files, control_groups = normalize_signal_groups(parameters["controls"])
+
+    # wandb is off unless a project is configured; every other wandb_*
+    # key is optional even then. See cherimoya.Cherimoya.fit's
+    # wandb_config docstring and cherimoya/_wandb.py.
+    if parameters["wandb_project"]:
+        wandb_config = {
+            "project": parameters["wandb_project"],
+            "name": parameters["wandb_name"],
+            "entity": parameters["wandb_entity"],
+            "tags": parameters["wandb_tags"],
+            "mode": parameters["wandb_mode"],
+            "config": dict(parameters),
+        }
+    else:
+        wandb_config = None
+
+    signal_group_names = _resolve_group_names(
+        signal_files, signal_groups, parameters["wandb_group_names"])
 
     if parameters["verbose"]:
         print("Split Mode: ", parameters["split_mode"])
@@ -305,6 +356,8 @@ def run(args):
         early_stopping=parameters["early_stopping"],
         dtype=parameters["dtype"],
         device=parameters["device"],
+        wandb_config=wandb_config,
+        signal_group_names=signal_group_names,
     )
 
     ### Evaluate Model

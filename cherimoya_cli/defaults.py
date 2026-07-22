@@ -76,6 +76,12 @@ default_fit_parameters = {
 	'random_state': None,
 	'performance_filename': 'performance.tsv',
 	'skip': False,
+	'wandb_project': None,
+	'wandb_name': None,
+	'wandb_entity': None,
+	'wandb_tags': [],
+	'wandb_mode': None,
+	'wandb_group_names': None,
 }
 
 
@@ -252,6 +258,12 @@ default_pipeline_parameters = {
 		'random_state': None,
 		'summits': False,
 		'performance_filename': None,
+		'wandb_project': None,
+		'wandb_name': None,
+		'wandb_entity': None,
+		'wandb_tags': [],
+		'wandb_mode': None,
+		'wandb_group_names': None,
 	},
 
 	# Attribution parameters
