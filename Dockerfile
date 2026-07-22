@@ -1,27 +1,31 @@
+# syntax=docker/dockerfile:1
 # droast ignore=DF007 reason="added a .dockerignore file"
-FROM python:3.12@sha256:1a7dbae78e9568b95a8e2934719c4bf984d7ae319b3659ed129f59d8aca6d7a8 AS builder
+FROM ghcr.io/astral-sh/uv:0.11.30-python3.12-trixie-slim@sha256:193af66bebd2668fd3cdc75176690e7e0956182cb5ff88dea156d278a8b16fa6 AS builder
 
 WORKDIR /work
-RUN cat /etc/os-release
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/opt/venv/bin:$PATH"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ \
+    gcc g++ zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
-ENV PATH="/opt/venv/bin:$PATH"
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PIP_NO_CACHE_DIR=1
-RUN python -m venv /opt/venv
+
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
 COPY . .
-# droast ignore=DF051 reason="pip should be latest"
-RUN python -m pip install --no-cache-dir --upgrade pip
-# droast ignore=DF051 reason="cherimoya installation is from pwd"
-RUN pip install --no-cache-dir . 
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen
 
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS main
 
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-CMD ["python3", "-c", "from cherimoya import Cherimoya; print('cherimoya imported OK')"]
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1
+CMD ["python3", "-c", "from cherimoya import Cherimoya; print('cherimoya imported OK')"]
