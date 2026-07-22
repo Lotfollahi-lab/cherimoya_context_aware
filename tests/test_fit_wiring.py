@@ -8,6 +8,16 @@ from unittest import mock
 import pytest
 
 
+def _write_bed(path, rows=(("chr2", 0, 100), ("chr8", 0, 100))):
+	"""A minimal on-disk loci/negatives BED. split_mode='chrom' (the
+	default) now resolves the split -- and so reads this file -- before
+	PeakGenerator is ever called, so wiring tests that mock PeakGenerator
+	away still need a real, parseable file to point ``loci``/``negatives``
+	at."""
+	path.write_text("\n".join("{}\t{}\t{}".format(*r) for r in rows) + "\n")
+	return str(path)
+
+
 @pytest.fixture
 def fit_json(tmp_path):
 	"""Write a minimal JSON that satisfies merge_parameters' required keys."""
@@ -19,10 +29,10 @@ def fit_json(tmp_path):
 	# values we care about for the test.
 	cfg = dict(default_fit_parameters)
 	cfg['sequences'] = 'fake.fa'
-	cfg['loci'] = 'fake.bed'
-	cfg['negatives'] = 'fake_negatives.bed'
+	cfg['loci'] = _write_bed(tmp_path / "loci.bed")
+	cfg['negatives'] = _write_bed(tmp_path / "negatives.bed")
 	cfg['signals'] = ['fake.bw']
-	cfg['name'] = 'fit_wiring_test'
+	cfg['name'] = str(tmp_path / 'fit_wiring_test')
 	cfg['device'] = 'cpu'
 	cfg['num_workers'] = 3   # the value we want to verify is forwarded
 	cfg['batch_size'] = 16
@@ -88,13 +98,13 @@ def test_fit_forwards_grouped_signals_to_peak_generator(tmp_path):
 
 	cfg = dict(default_fit_parameters)
 	cfg['sequences'] = 'fake.fa'
-	cfg['loci'] = 'fake.bed'
-	cfg['negatives'] = 'fake_negatives.bed'
+	cfg['loci'] = _write_bed(tmp_path / "loci.bed")
+	cfg['negatives'] = _write_bed(tmp_path / "negatives.bed")
 	# One unstranded ATAC group + one stranded TF group; per-group
 	# counts mean signal_groups=[1, 2].
 	cfg['signals'] = ['atac.bw', ['ctcf.+.bw', 'ctcf.-.bw']]
 	cfg['controls'] = [['ctl.+.bw', 'ctl.-.bw']]
-	cfg['name'] = 'fit_wiring_groups_test'
+	cfg['name'] = str(tmp_path / 'fit_wiring_groups_test')
 	cfg['device'] = 'cpu'
 
 	path = tmp_path / "fit.json"
@@ -142,8 +152,8 @@ def test_fit_does_not_flatten_signals_for_downstream_evaluate(tmp_path):
 	original_signals = [['ctcf.+.bw', 'ctcf.-.bw']]
 	cfg = dict(default_fit_parameters)
 	cfg['sequences'] = 'fake.fa'
-	cfg['loci'] = 'fake.bed'
-	cfg['negatives'] = 'fake_negatives.bed'
+	cfg['loci'] = _write_bed(tmp_path / "loci.bed")
+	cfg['negatives'] = _write_bed(tmp_path / "negatives.bed")
 	cfg['signals'] = original_signals
 	cfg['name'] = str(tmp_path / 'fit_eval_roundtrip')
 	cfg['device'] = 'cpu'
